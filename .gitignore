@@ -1,0 +1,18 @@
+# Private engineering journal — not part of the public repo
+workflow/
+
+# Dependencies & build output
+node_modules/
+dist/
+
+# Environment — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Tooling
+coverage/
+*.log
+.eslintcache
+*.tsbuildinfo
+CLAUDE.md

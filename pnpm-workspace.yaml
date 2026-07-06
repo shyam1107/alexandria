@@ -1,0 +1,6 @@
+# Install-time build-script allowlist (supply-chain hygiene):
+# esbuild needs its postinstall to place the platform binary;
+# @scarf/scarf is download telemetry — keep it blocked.
+allowBuilds:
+  '@scarf/scarf': false
+  esbuild: true
