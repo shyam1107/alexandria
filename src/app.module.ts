@@ -6,6 +6,8 @@ import type { Env } from './config/env.schema';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { RedisModule } from './redis/redis.module';
+import { IngestionApiModule } from './ingestion/ingestion-api.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -31,6 +33,8 @@ import { RedisModule } from './redis/redis.module';
     DatabaseModule,
     RedisModule,
     HealthModule,
+    IngestionApiModule,
+    AuthModule,
   ],
 })
 export class AppModule {}

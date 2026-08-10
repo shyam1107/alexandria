@@ -24,6 +24,18 @@ export const envSchema = z.object({
     .string()
     .default('true')
     .transform((v) => v === 'true'),
+  UPLOAD_URL_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  MAX_DOCUMENT_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
+  INGESTION_QUEUE: z.string().default('document-ingestion'),
+  INGESTION_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(2),
+  EMBEDDING_BASE_URL: z.string().default('http://localhost:11434'),
+  EMBEDDING_MODEL: z.string().default('nomic-embed-text'),
+  EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(768).refine((value) => value === 768, 'Phase 3 schema requires 768-dimensional embeddings'),
+  CHUNK_SIZE: z.coerce.number().int().positive().default(1200),
+  CHUNK_OVERLAP: z.coerce.number().int().nonnegative().default(200),
+  JWT_ACCESS_SECRET: z.string().min(32),
+  JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  REFRESH_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(2_592_000),
 
   OLLAMA_BASE_URL: z.string().default('http://localhost:11434'),
   GEMINI_API_KEY: z.string().optional(),

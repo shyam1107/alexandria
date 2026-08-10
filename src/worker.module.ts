@@ -5,6 +5,7 @@ import { validateEnv } from './config/env.schema';
 import type { Env } from './config/env.schema';
 import { DatabaseModule } from './database/database.module';
 import { RedisModule } from './redis/redis.module';
+import { IngestionWorkerModule } from './ingestion/ingestion-worker.module';
 
 /**
  * Root module for the worker process. Same codebase, different composition:
@@ -31,6 +32,7 @@ import { RedisModule } from './redis/redis.module';
     }),
     DatabaseModule,
     RedisModule,
+    IngestionWorkerModule,
   ],
 })
 export class WorkerModule {}

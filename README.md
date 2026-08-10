@@ -68,8 +68,8 @@ Ollama (local LLM, several-GB downloads) is opt-in: `pnpm infra:llm`, then pull 
 ## Roadmap
 
 - [x] **Foundation** — NestJS scaffold (API + worker), validated config, Drizzle, dev infra, health checks with probe deadlines, Swagger
-- [ ] **Identity & tenancy** — JWT auth, workspaces, RBAC, Postgres RLS
-- [ ] **Ingestion** — upload → parse → chunk → embed → index via BullMQ (retries, DLQ, idempotency)
+- [x] **Identity & tenancy** — JWT-style access tokens, rotating refresh tokens, workspaces, membership guards, Postgres RLS
+- [x] **Ingestion** — upload → parse → chunk → embed → index via BullMQ (retries, idempotent processing, status API)
 - [ ] **Retrieval** — pgvector HNSW + Postgres FTS, RRF, metadata filters, re-ranking
 - [ ] **Generation** — streaming answers (SSE), citations, conversation memory, grounded refusals
 - [ ] **LLM platform** — provider fallbacks, retries, per-tenant token & cost tracking
