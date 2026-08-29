@@ -1,11 +1,9 @@
 import { Body, Controller, Post, UseGuards } from '@nestjs/common';
-import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
 import { AuthService } from './auth.service';
 import { AccessTokenGuard } from './auth.guards';
-
-class RegisterDto { @IsEmail() email!: string; @IsString() @MinLength(12) password!: string; @IsString() @IsNotEmpty() workspaceName!: string; }
-class LoginDto { @IsEmail() email!: string; @IsString() @IsNotEmpty() password!: string; }
-class RefreshDto { @IsString() @IsNotEmpty() refreshToken!: string; }
+import { LoginDto } from './dto/login.dto';
+import { RefreshDto } from './dto/refresh.dto';
+import { RegisterDto } from './dto/register.dto';
 
 @Controller('auth')
 export class AuthController {

@@ -15,6 +15,20 @@
       "when": 1786383763143,
       "tag": "0001_silent_rocket_racer",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787416909322,
+      "tag": "0002_force_rls",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787419835694,
+      "tag": "0003_workspace_foreign_keys",
+      "breakpoints": true
     }
   ]
 }

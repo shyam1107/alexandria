@@ -5,6 +5,7 @@ import { DRIZZLE } from '../database/database.module';
 import { memberships } from '../database/schema';
 import { AuthService } from './auth.service';
 import type { RequestWithAuth } from './auth.types';
+import { BEARER_PREFIX } from './auth.constants';
 
 @Injectable()
 export class AccessTokenGuard implements CanActivate {
@@ -12,8 +13,8 @@ export class AccessTokenGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const request = context.switchToHttp().getRequest<RequestWithAuth>();
     const header = request.headers.authorization;
-    if (!header || Array.isArray(header) || !header.startsWith('Bearer ')) throw new UnauthorizedException('Bearer token required');
-    request.user = this.auth.verifyAccessToken(header.slice(7));
+    if (!header || Array.isArray(header) || !header.startsWith(BEARER_PREFIX)) throw new UnauthorizedException('Bearer token required');
+    request.user = this.auth.verifyAccessToken(header.slice(BEARER_PREFIX.length));
     return true;
   }
 }

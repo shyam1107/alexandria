@@ -1,18 +1,9 @@
 import { Body, Controller, Param, ParseUUIDPipe, Post, Get, Req, UseGuards } from '@nestjs/common';
-import { IsInt, IsNotEmpty, IsString, IsUUID, Max, Min } from 'class-validator';
 import { DocumentService } from './document.service';
 import { AccessTokenGuard, WorkspaceMemberGuard } from '../auth/auth.guards';
 import type { RequestWithAuth } from '../auth/auth.types';
-
-class CreateUploadDto {
-  @IsString() @IsNotEmpty() filename!: string;
-  @IsString() @IsNotEmpty() contentType!: string;
-  @IsInt() @Min(1) @Max(26214400) byteSize!: number;
-}
-
-class CompleteUploadDto {
-  @IsUUID() versionId!: string;
-}
+import { CompleteUploadDto } from './dto/complete-upload.dto';
+import { CreateUploadDto } from './dto/create-upload.dto';
 
 @Controller('documents')
 @UseGuards(AccessTokenGuard, WorkspaceMemberGuard)

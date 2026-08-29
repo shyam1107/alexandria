@@ -7,6 +7,13 @@ export default defineConfig({
   out: './drizzle',
   dbCredentials: {
     // Drizzle-kit runs outside Nest, so it reads the env directly.
-    url: process.env.DATABASE_URL ?? 'postgres://alexandria:alexandria@localhost:5432/alexandria',
+    //
+    // Migrations use MIGRATION_DATABASE_URL — the *owner* connection — not
+    // DATABASE_URL, which is now the least-privilege runtime role with no DDL
+    // rights. Keeping them separate is the point: the API and worker processes
+    // never hold a credential that can alter a table or drop an RLS policy.
+    url:
+      process.env.MIGRATION_DATABASE_URL ??
+      'postgres://alexandria:alexandria@localhost:5432/alexandria',
   },
 });

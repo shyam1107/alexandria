@@ -27,7 +27,15 @@ export class ChunkerService {
       const chunk = normalized.slice(start, end).trim();
       if (chunk) chunks.push(chunk);
       if (end >= normalized.length) break;
-      start = Math.max(end - this.overlap, start + 1);
+      // Rewinding by a fixed character count lands mid-word, so every chunk
+      // after the first would begin with a fragment ("ord24 word25 ..."). That
+      // fragment is embedded as-is and surfaces verbatim in a citation, so
+      // snap forward to the next whitespace. Falling back to the raw offset
+      // when there is none keeps the loop advancing on unbroken input.
+      let next = Math.max(end - this.overlap, start + 1);
+      const boundary = /\s/.exec(normalized.slice(next, end));
+      if (boundary) next += boundary.index + 1;
+      start = next;
     }
     return chunks;
   }

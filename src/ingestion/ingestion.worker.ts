@@ -2,9 +2,9 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
-import { sql } from 'drizzle-orm';
 import type { Db } from '../database/database.module';
 import { DRIZZLE } from '../database/database.module';
+import { withWorkspace } from '../database/tenant';
 import { documentChunks, documentVersions, documents } from '../database/schema';
 import { INGESTION_QUEUE, type IngestDocumentJob } from './ingestion.constants';
 import { StorageService } from './storage.service';
@@ -25,8 +25,7 @@ export class IngestionWorker extends WorkerHost {
 
   async process(job: Job<IngestDocumentJob>): Promise<void> {
     const { documentId, documentVersionId, workspaceId, objectKey, contentType, originalFilename } = job.data;
-    await this.db.transaction(async (tx) => {
-      await tx.execute(sql`select set_config('app.workspace_id', ${workspaceId}, true)`);
+    await withWorkspace(this.db, workspaceId, async (tx) => {
       await tx.update(documentVersions).set({ status: 'processing', updatedAt: new Date(), failureMessage: null }).where(and(eq(documentVersions.id, documentVersionId), eq(documentVersions.workspaceId, workspaceId)));
       await tx.update(documents).set({ status: 'processing', updatedAt: new Date() }).where(and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)));
     });
@@ -36,8 +35,7 @@ export class IngestionWorker extends WorkerHost {
       if (chunks.length === 0) throw new Error('Document contains no extractable text');
       const embeddedChunks: Array<{ chunkIndex: number; content: string; embedding: number[] }> = [];
       for (const [chunkIndex, content] of chunks.entries()) embeddedChunks.push({ chunkIndex, content, embedding: await this.embeddings.embed(content) });
-      await this.db.transaction(async (tx) => {
-        await tx.execute(sql`select set_config('app.workspace_id', ${workspaceId}, true)`);
+      await withWorkspace(this.db, workspaceId, async (tx) => {
         await tx.delete(documentChunks).where(and(eq(documentChunks.documentVersionId, documentVersionId), eq(documentChunks.workspaceId, workspaceId)));
         for (const { chunkIndex, content, embedding } of embeddedChunks) await tx.insert(documentChunks).values({ documentVersionId, workspaceId, chunkIndex, content, tokenCount: content.split(/\s+/).length, embedding, embeddingModel: this.embeddings.modelName, searchVector: content });
         await tx.update(documentVersions).set({ status: 'indexed', parserVersion: parsed.parserVersion, embeddingModel: this.embeddings.modelName, updatedAt: new Date() }).where(eq(documentVersions.id, documentVersionId));
@@ -45,10 +43,14 @@ export class IngestionWorker extends WorkerHost {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 1000) : 'Document processing failed';
-      await this.db.transaction(async (tx) => {
-        await tx.execute(sql`select set_config('app.workspace_id', ${workspaceId}, true)`);
-        await tx.update(documentVersions).set({ status: 'failed', failureMessage: message, updatedAt: new Date() }).where(eq(documentVersions.id, documentVersionId));
-        await tx.update(documents).set({ status: 'failed', updatedAt: new Date() }).where(eq(documents.id, documentId));
+      // `attemptsStarted` is incremented when the job moves to active, so it is
+      // already 1 during the first run. Only the last attempt is terminal —
+      // reporting `failed` earlier would make the API lie while retries are
+      // still pending, flickering failed -> processing -> indexed.
+      const isFinalAttempt = job.attemptsStarted >= (job.opts.attempts ?? 1);
+      await withWorkspace(this.db, workspaceId, async (tx) => {
+        await tx.update(documentVersions).set({ status: isFinalAttempt ? 'failed' : 'processing', failureMessage: message, updatedAt: new Date() }).where(eq(documentVersions.id, documentVersionId));
+        if (isFinalAttempt) await tx.update(documents).set({ status: 'failed', updatedAt: new Date() }).where(eq(documents.id, documentId));
       });
       throw error;
     }
