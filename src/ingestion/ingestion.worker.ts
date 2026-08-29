@@ -33,11 +33,14 @@ export class IngestionWorker extends WorkerHost {
       const parsed = await this.parser.parse(await this.storage.download(objectKey), contentType, originalFilename);
       const chunks = this.chunker.split(parsed.text);
       if (chunks.length === 0) throw new Error('Document contains no extractable text');
-      const embeddedChunks: Array<{ chunkIndex: number; content: string; embedding: number[] }> = [];
-      for (const [chunkIndex, content] of chunks.entries()) embeddedChunks.push({ chunkIndex, content, embedding: await this.embeddings.embed(content) });
+      const embeddedChunks: Array<{ chunkIndex: number; content: string; charStart: number; charEnd: number; embedding: number[] }> = [];
+      for (const [chunkIndex, chunk] of chunks.entries()) embeddedChunks.push({ chunkIndex, ...chunk, embedding: await this.embeddings.embed(chunk.content) });
       await withWorkspace(this.db, workspaceId, async (tx) => {
         await tx.delete(documentChunks).where(and(eq(documentChunks.documentVersionId, documentVersionId), eq(documentChunks.workspaceId, workspaceId)));
-        for (const { chunkIndex, content, embedding } of embeddedChunks) await tx.insert(documentChunks).values({ documentVersionId, workspaceId, chunkIndex, content, tokenCount: content.split(/\s+/).length, embedding, embeddingModel: this.embeddings.modelName, searchVector: content });
+        // searchVector is gone from the insert list: it is a STORED generated
+        // column now, so Postgres derives it from content and the two can
+        // never drift apart.
+        for (const { chunkIndex, content, charStart, charEnd, embedding } of embeddedChunks) await tx.insert(documentChunks).values({ documentVersionId, workspaceId, chunkIndex, content, charStart, charEnd, tokenCount: content.split(/\s+/).length, embedding, embeddingModel: this.embeddings.modelName });
         await tx.update(documentVersions).set({ status: 'indexed', parserVersion: parsed.parserVersion, embeddingModel: this.embeddings.modelName, updatedAt: new Date() }).where(eq(documentVersions.id, documentVersionId));
         await tx.update(documents).set({ status: 'indexed', updatedAt: new Date() }).where(eq(documents.id, documentId));
       });

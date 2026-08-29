@@ -7,6 +7,7 @@ import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { RedisModule } from './redis/redis.module';
 import { IngestionApiModule } from './ingestion/ingestion-api.module';
+import { RetrievalModule } from './retrieval/retrieval.module';
 import { AuthModule } from './auth/auth.module';
 
 @Module({
@@ -34,6 +35,7 @@ import { AuthModule } from './auth/auth.module';
     RedisModule,
     HealthModule,
     IngestionApiModule,
+    RetrievalModule,
     AuthModule,
   ],
 })

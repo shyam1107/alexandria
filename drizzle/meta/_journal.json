@@ -29,6 +29,13 @@
       "when": 1787419835694,
       "tag": "0003_workspace_foreign_keys",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1788007320581,
+      "tag": "0004_worried_power_man",
+      "breakpoints": true
     }
   ]
 }

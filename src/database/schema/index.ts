@@ -7,6 +7,7 @@
  *  - Phase 5: conversations, messages, citations
  *  - Phase 6: usage/token ledger
  */
+import { sql } from 'drizzle-orm';
 import { customType, index, integer, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
 import { documentStatus, membershipRole, refreshTokenStatus } from './enums';
 
@@ -18,6 +19,14 @@ const vector = customType<{ data: number[]; driverData: string }>({
 	},
 	toDriver(value) {
 		return `[${value.join(',')}]`;
+	},
+});
+
+// Read-only: tsvector is maintained by Postgres as a STORED generated column,
+// never written or compared from application code.
+const tsvector = customType<{ data: string; driverData: string }>({
+	dataType() {
+		return 'tsvector';
 	},
 });
 
@@ -101,12 +110,27 @@ export const documentChunks = pgTable('document_chunks', {
 	workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
 	chunkIndex: integer('chunk_index').notNull(),
 	content: text('content').notNull(),
+	// Offsets into the parser's original output (pre-normalization), captured by
+	// the chunker. Nullable only because pre-Phase-4 rows predate them; the
+	// worker always writes them. Phase 5 citations slice the source with these.
+	charStart: integer('char_start'),
+	charEnd: integer('char_end'),
 	tokenCount: integer('token_count'),
 	embedding: vector('embedding'),
 	embeddingModel: varchar('embedding_model', { length: 128 }),
-	searchVector: text('search_vector'),
+	// Was a `text` copy of `content` written by the worker — double storage and
+	// not even a tsvector. Now derived by Postgres: one source of truth, and the
+	// two-argument to_tsvector form is IMMUTABLE, which STORED requires. The
+	// 'english' regconfig is baked in; a multilingual corpus means revisiting
+	// this column (per-language configs or 'simple').
+	searchVector: tsvector('search_vector').generatedAlwaysAs(sql`to_tsvector('english', content)`),
 	createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
 	uniqueIndex('document_chunks_version_index_idx').on(table.documentVersionId, table.chunkIndex),
 	index('document_chunks_workspace_idx').on(table.workspaceId),
+	// HNSW over IVFFlat: no training pass, no recall decay as the table grows,
+	// better recall/latency at our scale; the price is build time and memory.
+	// Default m=16 / ef_construction=64 — tune ef_search per query, not here.
+	index('document_chunks_embedding_hnsw_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
+	index('document_chunks_search_vector_gin_idx').using('gin', table.searchVector),
 ]);
