@@ -9,7 +9,17 @@ interface GeminiChunk {
     content?: { parts?: Array<{ text?: string }> };
     finishReason?: string;
   }>;
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    /**
+     * Gemini 2.5+/3.x reasoning tokens. Billed at OUTPUT rates and reported
+     * SEPARATELY from candidatesTokenCount — absent entirely on the
+     * non-reasoning models the recorded fixture came from, which is why only
+     * a live call could surface it.
+     */
+    thoughtsTokenCount?: number;
+  };
   promptFeedback?: { blockReason?: string };
 }
 
@@ -46,7 +56,11 @@ function mapFinishReason(raw: string | undefined): LlmFinishReason {
  *    `assistant` is Gemini's `model`; consecutive same-role messages are
  *    merged with a blank line.
  *  - Usage is `usageMetadata`, which may appear on more than the last chunk —
- *    the LAST one seen wins.
+ *    the LAST one seen wins. On thinking models it also carries
+ *    `thoughtsTokenCount`, which is NOT included in `candidatesTokenCount`
+ *    and IS billed at output rates: counting only candidates undercounts the
+ *    bill (measured 6 visible vs 118 thinking on gemini-3.6-flash — a 20x
+ *    understatement, and the ledger and quota inherit the error).
  *  - A prompt can be blocked outright (promptFeedback.blockReason) with ZERO
  *    candidates: a stream that ends having emitted nothing. That maps to
  *    PromptBlockedError — never a done-with-empty-answer, which would
@@ -152,7 +166,14 @@ export class GeminiProvider implements LlmProvider {
       if (chunk.usageMetadata) {
         usage = {
           promptTokens: chunk.usageMetadata.promptTokenCount ?? 0,
-          completionTokens: chunk.usageMetadata.candidatesTokenCount ?? 0,
+          // Thinking tokens are output tokens as far as the invoice is
+          // concerned, so they are output tokens as far as the ledger is
+          // concerned. Reporting only the visible answer would under-bill
+          // every reasoning model and silently under-charge the quota that
+          // is supposed to bound spend. The visible answer's length is
+          // recoverable from the answer text; the money is not recoverable
+          // from anywhere else.
+          completionTokens: (chunk.usageMetadata.candidatesTokenCount ?? 0) + (chunk.usageMetadata.thoughtsTokenCount ?? 0),
         };
       }
     };

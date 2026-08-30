@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { and, desc, eq, gt, lt, sql } from 'drizzle-orm';
 import type { Db } from '../database/database.module';
 import { DRIZZLE } from '../database/database.module';
-import { withWorkspace } from '../database/tenant';
+import { withWorkspace, type Tx } from '../database/tenant';
 import { conversations, messages } from '../database/schema';
 
 export type ConversationRow = typeof conversations.$inferSelect;
@@ -88,7 +88,11 @@ export class ConversationRepository {
       // for. The same lesson as the Phase 3.5 refresh-token rotation race:
       // SELECT-then-write is not atomic just because it is in a transaction.
       // The lock is nearly free: the updatedAt write below takes it anyway.
-      await tx.execute(sql`select 1 from conversations where id = ${input.conversationId} for update`);
+      // The lock predicate carries the workspace too: a foreign conversation
+      // id returns zero rows here (caller 404s) instead of blocking on a
+      // row RLS will never let it read.
+      const locked = await this.lockConversation(tx, workspaceId, input.conversationId);
+      if (!locked) throw new Error('Conversation not found');
       const [{ next }] = await tx
         .select({ next: sql<number>`coalesce(max(${messages.seq}), 0) + 1` })
         .from(messages)
@@ -97,7 +101,7 @@ export class ConversationRepository {
         .insert(messages)
         .values({ ...input, workspaceId, seq: next })
         .returning();
-      await tx.update(conversations).set({ updatedAt: new Date() }).where(eq(conversations.id, input.conversationId));
+      await tx.update(conversations).set({ updatedAt: new Date() }).where(and(eq(conversations.id, input.conversationId), eq(conversations.workspaceId, workspaceId)));
       return row;
     });
   }
@@ -107,7 +111,7 @@ export class ConversationRepository {
       const [row] = await tx
         .select()
         .from(messages)
-        .where(and(eq(messages.conversationId, conversationId), eq(messages.clientMessageId, clientMessageId), eq(messages.role, 'user')));
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.workspaceId, workspaceId), eq(messages.clientMessageId, clientMessageId), eq(messages.role, 'user')));
       return row;
     });
   }
@@ -126,7 +130,7 @@ export class ConversationRepository {
       const [row] = await tx
         .select()
         .from(messages)
-        .where(and(eq(messages.conversationId, conversationId), eq(messages.role, 'assistant'), eq(messages.partial, false), gt(messages.seq, seq)))
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.workspaceId, workspaceId), eq(messages.role, 'assistant'), eq(messages.partial, false), gt(messages.seq, seq)))
         .orderBy(messages.seq)
         .limit(1);
       return row;
@@ -143,7 +147,20 @@ export class ConversationRepository {
     await withWorkspace(this.db, workspaceId, async (tx) => {
       await tx
         .delete(messages)
-        .where(and(eq(messages.conversationId, conversationId), eq(messages.role, 'assistant'), eq(messages.partial, true), gt(messages.seq, seq)));
+        .where(and(eq(messages.conversationId, conversationId), eq(messages.workspaceId, workspaceId), eq(messages.role, 'assistant'), eq(messages.partial, true), gt(messages.seq, seq)));
     });
+  }
+
+  /**
+   * Defence in depth for the seq-allocation lock in insertMessage: the
+   * conversation row lock is taken by id alone, so a foreign conversation id
+   * would block on a row the caller cannot read (RLS hides it, but the lock
+   * still waits). Locking WITH the workspace predicate makes the intent
+   * tenant-scoped at the row level too — and returns zero rows for a foreign
+   * conversation, which the caller treats as a 404, instead of blocking.
+   */
+  private async lockConversation(tx: Tx, workspaceId: string, conversationId: string): Promise<boolean> {
+    const result = await tx.execute(sql`select 1 from conversations where id = ${conversationId} and workspace_id = ${workspaceId} for update`);
+    return result.rows.length > 0;
   }
 }

@@ -1,11 +1,15 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import { LoggerModule } from 'nestjs-pino';
 import { validateEnv } from './config/env.schema';
 import type { Env } from './config/env.schema';
 import { DatabaseModule } from './database/database.module';
 import { HealthModule } from './health/health.module';
 import { RedisModule } from './redis/redis.module';
+import { MetricsModule } from './metrics/metrics.module';
+import { MetricsInterceptor } from './metrics/metrics.interceptor';
+import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { IngestionApiModule } from './ingestion/ingestion-api.module';
 import { RetrievalModule } from './retrieval/retrieval.module';
 import { LlmModule } from './llm/llm.module';
@@ -35,12 +39,21 @@ import { AuthModule } from './auth/auth.module';
     }),
     DatabaseModule,
     RedisModule,
+    RateLimitModule,
+    MetricsModule,
     HealthModule,
     IngestionApiModule,
     RetrievalModule,
     LlmModule,
     ChatModule,
     AuthModule,
+  ],
+  providers: [
+    // The metrics interceptor wraps the whole handler chain — guards
+    // included — so 429s/402s/401s from guards are counted with their real
+    // status class. Registered here (not per-controller) because it is
+    // cross-cutting infrastructure, not business logic.
+    { provide: APP_INTERCEPTOR, useClass: MetricsInterceptor },
   ],
 })
 export class AppModule {}

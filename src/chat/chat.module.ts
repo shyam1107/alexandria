@@ -7,10 +7,12 @@ import { ChatController } from './chat.controller';
 import { ChatService } from './chat.service';
 import { ConversationRepository } from './conversation.repository';
 import { QueryRewriterService } from './query-rewriter.service';
+import { ChatRateLimitGuard } from './chat-rate-limit.guard';
+import { QuotaGuard } from './quota.guard';
 
 @Module({
   imports: [RetrievalModule, AuthModule],
   controllers: [ChatController],
-  providers: [ChatService, ConversationRepository, QueryRewriterService],
+  providers: [ChatService, ConversationRepository, QueryRewriterService, ChatRateLimitGuard, QuotaGuard],
 })
 export class ChatModule {}

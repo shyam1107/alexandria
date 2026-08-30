@@ -17,6 +17,20 @@ import { LlmTimeoutError, PromptBlockedError } from '../src/llm/llm.errors';
 import type { LlmEvent } from '../src/llm/llm.types';
 import { BLOCKED_REFUSAL, NO_CONTEXT_REFUSAL, PROMPT_VERSION } from '../src/chat/prompt';
 
+/** Redis double for the ledger's quota counter: the surface the ledger touches. */
+function fakeRedisQuota() {
+  const store = new Map<string, number>();
+  const multi = { incrby: (k: string, n: number) => { store.set(k, (store.get(k) ?? 0) + n); return multi; }, expire: () => multi, exec: async () => [] };
+  return {
+    get: async (k: string) => (store.has(k) ? String(store.get(k)) : null),
+    incrby: async (k: string, n: number) => { store.set(k, (store.get(k) ?? 0) + n); return store.get(k)!; },
+    expire: async () => 1,
+    multi: () => multi,
+    _store: store,
+  } as never;
+}
+
+
 /**
  * The chat pipeline end to end, with no model running anywhere: generation
  * is scripted (deterministic tokens), embeddings are one-hot vectors
@@ -44,6 +58,8 @@ const settings = {
   CHAT_CONTEXT_TOKEN_BUDGET: 3000,
   GENERATION_MAX_TOKENS: 1024,
   GENERATION_TEMPERATURE: 0.2,
+  HNSW_EF_SEARCH: 80,
+  CHAT_REWRITE_BUDGET_MS: 5000,
 } as Partial<Env>;
 const config = { get: (key: keyof Env) => settings[key] } as unknown as ConfigService<Env, true>;
 
@@ -86,8 +102,8 @@ describe('chat (integration)', () => {
     // The ledger is REAL here (same DB, runtime role): the pipeline's cost
     // accounting is part of what this suite proves, not an implementation
     // detail to stub away.
-    const ledger = new UsageLedger(db);
-    return new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
+    const ledger = new UsageLedger(db, fakeRedisQuota());
+    return new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings, config), new QueryRewriterService(llm, ledger, config), llm, ledger, config);
   }
 
   async function allMessages(conversationId: string) {
@@ -290,8 +306,8 @@ describe('chat (integration)', () => {
       prompts.push(messages);
       return messages[0].content.startsWith('Rewrite the user') ? ['rewritten'] : ANSWER_CHUNKS;
     });
-    const ledger = new UsageLedger(db);
-    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
+    const ledger = new UsageLedger(db, fakeRedisQuota());
+    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings, config), new QueryRewriterService(llm, ledger, config), llm, ledger, config);
 
     const abort = new AbortController();
     const first = new CollectingSink();
@@ -369,8 +385,8 @@ describe('chat (integration)', () => {
       }
     }
     const llm = new StallsProvider([]);
-    const ledger = new UsageLedger(db);
-    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
+    const ledger = new UsageLedger(db, fakeRedisQuota());
+    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings, config), new QueryRewriterService(llm, ledger, config), llm, ledger, config);
 
     const sink = new CollectingSink();
     await chat.streamChat(workspaceA, userId, { message: 'refund policy?' }, sink, new AbortController().signal);
@@ -396,8 +412,8 @@ describe('chat (integration)', () => {
       }
     }
     const llm = new BlockedProvider([]);
-    const ledger = new UsageLedger(db);
-    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
+    const ledger = new UsageLedger(db, fakeRedisQuota());
+    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings, config), new QueryRewriterService(llm, ledger, config), llm, ledger, config);
 
     const sink = new CollectingSink();
     await chat.streamChat(workspaceA, userId, { message: 'refund policy?' }, sink, new AbortController().signal);

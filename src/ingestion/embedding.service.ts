@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.schema';
 import { UsageLedger } from '../llm/usage-ledger';
+import type { EmbeddingCache } from './embedding-cache.service';
 
 export interface EmbedContext {
   workspaceId: string;
@@ -36,6 +37,7 @@ export class EmbeddingService {
   constructor(
     config: ConfigService<Env, true>,
     private readonly ledger: UsageLedger,
+    private readonly cache?: EmbeddingCache,
   ) {
     this.baseUrl = config.get('EMBEDDING_BASE_URL', { infer: true }).replace(/\/$/, '');
     this.model = config.get('EMBEDDING_MODEL', { infer: true });
@@ -49,10 +51,21 @@ export class EmbeddingService {
   }
 
   async embed(text: string, context: EmbedContext): Promise<number[]> {
+    // Cache first: an exact (model, normalized-text) hit IS the embedding —
+    // the model is a pure function, so the memoized vector is not
+    // "possibly stale", it is the answer. No provider call happened, so no
+    // ledger row: the ledger records spend, and a cache hit spends nothing.
+    const cached = await this.cache?.get(this.model, text);
+    if (cached) return cached;
+
     let lastError: unknown;
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       try {
         const embedding = await this.embedOnce(text);
+        // Cache write before the ledger row: Cache.set swallows its own
+        // errors, so it can never gate the ledger record of the provider
+        // call that produced this vector.
+        await this.cache?.set(this.model, text, embedding);
         // Usage arrives nowhere for Ollama embeddings: prompt_tokens stays
         // null rather than estimated. Estimated tokens are how finance stops
         // trusting a ledger. (Flat-price provider: cost is still its

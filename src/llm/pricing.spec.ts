@@ -8,15 +8,16 @@ import { computeCostMicroUsd } from './pricing';
  */
 describe('computeCostMicroUsd', () => {
   it('computes exact integer micro-USD for a metered model', () => {
-    // gemini-2.0-flash: $0.10 / $0.40 per 1M tokens.
-    // 2M prompt + 500k completion = $0.20 + $0.20 = $0.40 = 400_000 micro-USD.
-    expect(computeCostMicroUsd('gemini', 'gemini-2.0-flash', 2_000_000, 500_000)).toBe(400_000n);
+    // gemini-3.1-flash-lite: $0.25 / $1.50 per 1M tokens (verified 2026-08-30).
+    // 2M prompt @ $0.25/1M = $0.50; 500k completion @ $1.50/1M = $0.75.
+    // $1.25 total = 1_250_000 micro-USD, computed in integers throughout.
+    expect(computeCostMicroUsd('gemini', 'gemini-3.1-flash-lite', 2_000_000, 500_000)).toBe(1_250_000n);
   });
 
   it('floors sub-cent calls to integer micro-USD — never a float', () => {
-    // 100 prompt tokens at $0.10/1M = 10 micro-USD exactly.
-    expect(computeCostMicroUsd('gemini', 'gemini-2.0-flash', 100, 0)).toBe(10n);
-    const cost = computeCostMicroUsd('gemini', 'gemini-2.0-flash', 7, 3);
+    // 100 prompt tokens at $0.25/1M = 25 micro-USD exactly.
+    expect(computeCostMicroUsd('gemini', 'gemini-3.1-flash-lite', 100, 0)).toBe(25n);
+    const cost = computeCostMicroUsd('gemini', 'gemini-3.1-flash-lite', 7, 3);
     expect(typeof cost).toBe('bigint');
   });
 

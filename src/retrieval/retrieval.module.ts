@@ -7,11 +7,12 @@ import { AuthModule } from '../auth/auth.module';
 import { IngestionCoreModule } from '../ingestion/ingestion-core.module';
 import { RetrievalController } from './retrieval.controller';
 import { RetrievalService } from './retrieval.service';
+import { SearchRateLimitGuard } from './search-rate-limit.guard';
 
 @Module({
   imports: [IngestionCoreModule, AuthModule],
   controllers: [RetrievalController],
-  providers: [RetrievalService],
+  providers: [RetrievalService, SearchRateLimitGuard],
   // Exported for the chat module: chat consumes retrieval as-is.
   exports: [RetrievalService],
 })

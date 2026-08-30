@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
 import { and, eq } from 'drizzle-orm';
@@ -12,9 +12,22 @@ import { ParserService } from './parser.service';
 import { ChunkerService } from './chunker.service';
 import { EmbeddingService } from './embedding.service';
 
+/**
+ * Concurrency is read from process.env, not ConfigService: decorator options
+ * are evaluated at class-definition time, before any Nest module (and so
+ * before ConfigService) exists. The zod schema still owns validation and
+ * fail-fast for this variable — a bad value refuses the boot moments later —
+ * so the fallback here only covers the import-time window, and it is the same
+ * default the schema declares. The knob was validated but never read until
+ * Phase 7; a config knob that does nothing is worse than no knob.
+ */
+const WORKER_CONCURRENCY = Number(process.env.INGESTION_WORKER_CONCURRENCY) || 2;
+
 @Injectable()
-@Processor(INGESTION_QUEUE)
+@Processor(INGESTION_QUEUE, { concurrency: WORKER_CONCURRENCY })
 export class IngestionWorker extends WorkerHost {
+  private readonly logger = new Logger(IngestionWorker.name);
+
   constructor(
     @Inject(DRIZZLE) private readonly db: Db,
     private readonly storage: StorageService,
@@ -24,7 +37,12 @@ export class IngestionWorker extends WorkerHost {
   ) { super(); }
 
   async process(job: Job<IngestDocumentJob>): Promise<void> {
-    const { documentId, documentVersionId, workspaceId, objectKey, contentType, originalFilename } = job.data;
+    const { documentId, documentVersionId, workspaceId, objectKey, contentType, originalFilename, traceId } = job.data;
+    // The trace id rode the payload across the process boundary; logging it
+    // here is what lets a failed ingestion be correlated to the upload
+    // request that caused it. Absent = created outside a request (tests,
+    // replays): untraced, never invented.
+    if (traceId) this.logger.log(`ingest ${documentVersionId} trace=${traceId} doc=${documentId} workspace=${workspaceId} file=${originalFilename}`);
     await withWorkspace(this.db, workspaceId, async (tx) => {
       await tx.update(documentVersions).set({ status: 'processing', updatedAt: new Date(), failureMessage: null }).where(and(eq(documentVersions.id, documentVersionId), eq(documentVersions.workspaceId, workspaceId)));
       await tx.update(documents).set({ status: 'processing', updatedAt: new Date() }).where(and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)));

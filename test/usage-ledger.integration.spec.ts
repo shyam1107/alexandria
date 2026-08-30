@@ -10,6 +10,20 @@ import { llmUsageEvents } from '../src/database/schema';
 import { UsageLedger } from '../src/llm/usage-ledger';
 import { EmbeddingService } from '../src/ingestion/embedding.service';
 
+/** Redis double for the ledger's quota counter: the surface the ledger touches. */
+function fakeRedisQuota() {
+  const store = new Map<string, number>();
+  const multi = { incrby: (k: string, n: number) => { store.set(k, (store.get(k) ?? 0) + n); return multi; }, expire: () => multi, exec: async () => [] };
+  return {
+    get: async (k: string) => (store.has(k) ? String(store.get(k)) : null),
+    incrby: async (k: string, n: number) => { store.set(k, (store.get(k) ?? 0) + n); return store.get(k)!; },
+    expire: async () => 1,
+    multi: () => multi,
+    _store: store,
+  } as never;
+}
+
+
 /**
  * The cost ledger against the real database AS THE RUNTIME ROLE — RLS live.
  * Chat-answer and rewrite rows are asserted by the chat integration suite
@@ -47,7 +61,7 @@ describe('usage ledger (integration)', () => {
     await owner.connect();
     pool = new Pool({ connectionString: appUrl, max: 2 });
     db = drizzle(pool, { schema });
-    ledger = new UsageLedger(db);
+    ledger = new UsageLedger(db, fakeRedisQuota());
 
     workspaceA = (await owner.query(`insert into workspaces (name) values ('ledger-spec-a') returning id`)).rows[0].id;
     workspaceB = (await owner.query(`insert into workspaces (name) values ('ledger-spec-b') returning id`)).rows[0].id;
@@ -96,7 +110,7 @@ describe('usage ledger (integration)', () => {
     await ledger.record(workspaceA, {
       operation: 'chat_answer',
       provider: 'gemini',
-      model: 'gemini-2.0-flash',
+      model: 'gemini-3.1-flash-lite',
       promptTokens: 2_000_000,
       completionTokens: 500_000,
       success: true,
@@ -107,8 +121,9 @@ describe('usage ledger (integration)', () => {
       `select model, cost_micro_usd from llm_usage_events where workspace_id = $1 and provider = 'gemini' order by created_at`,
       [workspaceA],
     )).rows;
-    // $0.10/1M prompt + $0.40/1M completion: 2M/500k = $0.40 = 400_000 micro-USD.
-    expect(rows[0]).toEqual({ model: 'gemini-2.0-flash', cost_micro_usd: '400000' });
+    // $0.25/1M prompt + $1.50/1M completion: 2M prompt = $0.50, 500k
+    // completion = $0.75 => $1.25 = 1_250_000 micro-USD.
+    expect(rows[0]).toEqual({ model: 'gemini-3.1-flash-lite', cost_micro_usd: '1250000' });
     expect(rows[1]).toEqual({ model: 'gemini-9-unpriced', cost_micro_usd: null });
   });
 

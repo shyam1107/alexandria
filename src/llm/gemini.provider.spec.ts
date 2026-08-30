@@ -105,6 +105,55 @@ describe('GeminiProvider', () => {
     });
   });
 
+  it('bills thinking tokens as output — the live probe found the fixture could not', async () => {
+    // Recorded from a real gemini-3.6-flash response: 39 prompt, 6 visible
+    // candidate tokens, 118 THINKING tokens, and MAX_TOKENS after only 6
+    // visible tokens because reasoning consumed the whole 128 budget.
+    // thoughtsTokenCount is billed at output rates and is NOT included in
+    // candidatesTokenCount, so counting only candidates understated this
+    // call's output by 20x — and the cost ledger and the monthly quota both
+    // inherit that error. The earlier fixture came from a non-reasoning
+    // model, where the field does not exist at all; only a live call could
+    // ever have surfaced this.
+    responder = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(
+        sse([
+          JSON.stringify({ candidates: [{ content: { parts: [{ text: 'Also 30 days' }] } }] }),
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: '.' }] }, finishReason: 'MAX_TOKENS' }],
+            usageMetadata: { promptTokenCount: 39, candidatesTokenCount: 6, thoughtsTokenCount: 118, totalTokenCount: 163 },
+          }),
+        ]),
+      );
+    };
+
+    const events = await collect(provider(), [{ role: 'user', content: 'and for annual plans?' }]);
+    const done = events.at(-1) as Extract<(typeof events)[number], { type: 'done' }>;
+    expect(done.usage.promptTokens).toBe(39);
+    expect(done.usage.completionTokens).toBe(124); // 6 visible + 118 thinking
+    expect(done.finishReason).toBe('length');
+  });
+
+  it('still reports candidate tokens alone when a model declares no thinking', async () => {
+    // The non-reasoning path must not regress: absent thoughtsTokenCount
+    // contributes zero, never NaN.
+    responder = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(
+        sse([
+          JSON.stringify({
+            candidates: [{ content: { parts: [{ text: 'ok' }] }, finishReason: 'STOP' }],
+            usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 3 },
+          }),
+        ]),
+      );
+    };
+    const events = await collect(provider(), [{ role: 'user', content: 'hi' }]);
+    const done = events.at(-1) as Extract<(typeof events)[number], { type: 'done' }>;
+    expect(done.usage.completionTokens).toBe(3);
+  });
+
   it('maps a zero-candidate safety block to PromptBlockedError — never an empty done', async () => {
     responder = (_req, res) => {
       res.writeHead(200, { 'content-type': 'text/event-stream' });

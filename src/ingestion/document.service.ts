@@ -13,6 +13,7 @@ import { documents, documentVersions } from '../database/schema';
 import type { Env } from '../config/env.schema';
 import { INGESTION_QUEUE, INGEST_DOCUMENT_JOB, type IngestDocumentJob } from './ingestion.constants';
 import { StorageService } from './storage.service';
+import type { TraceContextService } from '../metrics/trace-context.service';
 
 export interface CreateDocumentInput {
   workspaceId: string;
@@ -30,6 +31,7 @@ export class DocumentService {
     @InjectQueue(INGESTION_QUEUE) private readonly queue: Queue<IngestDocumentJob>,
     private readonly storage: StorageService,
     config: ConfigService<Env, true>,
+    private readonly traceContext?: TraceContextService,
   ) {
     this.maxBytes = config.get('MAX_DOCUMENT_BYTES', { infer: true });
   }
@@ -90,6 +92,7 @@ export class DocumentService {
     await this.queue.add(INGEST_DOCUMENT_JOB, {
       documentId, documentVersionId: versionId, workspaceId, objectKey: version.objectKey,
       contentType: version.contentType, originalFilename: version.originalFilename,
+      traceId: this.traceContext?.currentTraceId(),
     }, { jobId: versionId, attempts: 5, backoff: { type: 'exponential', delay: 1000 }, removeOnComplete: 100, removeOnFail: 1000 });
     return { documentId, versionId, status: 'uploaded' as const };
   }

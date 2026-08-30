@@ -79,6 +79,7 @@ export class ResilientProvider implements LlmProvider {
     return Math.max(...this.providers.map((p) => p.countTokens(text)));
   }
 
+
   async *stream(params: LlmStreamParams): AsyncIterable<LlmEvent> {
     let lastError: unknown;
     for (const provider of this.providers) {

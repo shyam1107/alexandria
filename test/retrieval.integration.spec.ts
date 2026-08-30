@@ -40,6 +40,16 @@ const stubEmbeddings = {
   modelName: 'test-embedding-model',
 } as unknown as EmbeddingService;
 
+// RetrievalService now reads HNSW_EF_SEARCH from config; the suite pins it
+// the way production pins it — as an env value, not a hardcoded number.
+const configStub = () =>
+  ({
+    get: (key: string) => {
+      if (key === 'HNSW_EF_SEARCH') return 80;
+      throw new Error(`config stub asked for unexpected key ${key}`);
+    },
+  }) as never;
+
 describe('retrieval (integration)', () => {
   let owner: Client;
   let pool: Pool;
@@ -79,7 +89,7 @@ describe('retrieval (integration)', () => {
     owner = new Client({ connectionString: ownerUrl });
     await owner.connect();
     pool = new Pool({ connectionString: appUrl, max: 2 });
-    retrieval = new RetrievalService(drizzle(pool, { schema }), stubEmbeddings);
+    retrieval = new RetrievalService(drizzle(pool, { schema }), stubEmbeddings, configStub());
 
     workspaceA = (await owner.query(`insert into workspaces (name) values ('retrieval-spec-a') returning id`)).rows[0].id;
     workspaceB = (await owner.query(`insert into workspaces (name) values ('retrieval-spec-b') returning id`)).rows[0].id;
@@ -163,5 +173,179 @@ describe('retrieval (integration)', () => {
     const refundIndex = response.results.findIndex((r) => r.documentId === docRefund);
     expect(refundIndex).toBeGreaterThanOrEqual(0);
     if (shippingIndex !== -1) expect(refundIndex).toBeLessThan(shippingIndex);
+  });
+
+  /**
+   * THE HNSW POST-FILTER RECALL TRAP (the Phase 7 backlog item, fixed).
+   *
+   * An HNSW scan returns the GLOBAL top-k; tenant filters apply afterwards.
+   * A workspace whose best chunks sit below the global cut — because another
+   * tenant's near-identical chunks crowd the ranking — got short results or
+   * none at all before the iterative-scan fix, and the failure worsens as
+   * tenant count grows.
+   *
+   * The fixture must satisfy two non-negotiables, both learned the hard way
+   * while validating the fix against the real pgvector image:
+   *
+   * 1. The query plan must actually use the HNSW index. At fixture scale the
+   *    planner prefers sort-based plans, which mask the trap entirely (the
+   *    pre-fix query then returns correct results for the wrong reason).
+   *    `set_config('enable_sort', 'off')` makes the production plan shape —
+   *    HNSW ordered index scan — deterministic at fixture scale.
+   *
+   * 2. The needle must be REACHABLE in the HNSW graph. The one-hot "basis"
+   *    vectors used elsewhere in this suite are graph-isolated outliers with
+   *    no inbound edges — HNSW cannot return them regardless of settings, so
+   *    a needle built that way measures nothing. Instead all vectors here
+   *    share a line manifold, e0 + t*e1 with continuously varying t, which
+   *    is what real embedding manifolds look like and what HNSW's
+   *    connectivity assumptions are built on.
+   *
+   * Geometry: the foreign workspace holds 140 chunks at t = 0.0001..0.0140
+   * (all closer to the query than the target's chunks — they occupy the
+   * global top-k cut); the target workspace holds 31 chunks at
+   * t = 0.02..0.05. The target's best chunk (t=0.02, content
+   * 'needle-content-zero') sits at global rank 141 — well below the global
+   * top-50 cut. Pre-fix, the vector leg returned ZERO rows for the target
+   * workspace: total starvation. Post-fix (iterative scan), all 31 surface.
+   *
+   * Proven to bite: reverting vectorLeg to the join shape and dropping the
+   * GUCs makes this test fail with zero vector results.
+   */
+  it('finds chunks ranked below the global HNSW cut (post-filter recall trap)', async () => {
+    const lineVector = (t: number) => {
+      const v = new Array<number>(DIMENSIONS).fill(0);
+      v[0] = 1;
+      v[1] = t;
+      return `[${v.join(',')}]`;
+    };
+
+    // Foreign workspace: 140 chunks crowding the global top-k.
+    const wsCrowd = (await owner.query(`insert into workspaces (name) values ('retrieval-hnsw-crowd') returning id`)).rows[0].id;
+    const crowdDoc = (await owner.query(`insert into documents (workspace_id, title, status) values ($1, 'crowd doc', 'indexed') returning id`, [wsCrowd])).rows[0].id;
+    const crowdVersion = (
+      await owner.query(
+        `insert into document_versions (document_id, workspace_id, object_key, original_filename, content_type, byte_size, status)
+         values ($1, $2, 'k/crowd', 'crowd.txt', 'text/plain', 100, 'indexed') returning id`,
+        [crowdDoc, wsCrowd],
+      )
+    ).rows[0].id;
+    for (let g = 0; g < 140; g++) {
+      await owner.query(
+        `insert into document_chunks (document_version_id, workspace_id, chunk_index, content, char_start, char_end, embedding, embedding_model)
+         values ($1, $2, $3, $4, 0, 20, $5::vector, 'test-embedding-model')`,
+        [crowdVersion, wsCrowd, g, `crowd filler ${g}`, lineVector(0.0001 * (g + 1))],
+      );
+    }
+
+    // Target workspace: 31 chunks, ALL ranked below the global cut.
+    const wsTarget = (await owner.query(`insert into workspaces (name) values ('retrieval-hnsw-target') returning id`)).rows[0].id;
+    const targetDoc = (await owner.query(`insert into documents (workspace_id, title, status) values ($1, 'target doc', 'indexed') returning id`, [wsTarget])).rows[0].id;
+    const targetVersion = (
+      await owner.query(
+        `insert into document_versions (document_id, workspace_id, object_key, original_filename, content_type, byte_size, status)
+         values ($1, $2, 'k/target', 'target.txt', 'text/plain', 100, 'indexed') returning id`,
+        [targetDoc, wsTarget],
+      )
+    ).rows[0].id;
+    for (let g = 0; g < 31; g++) {
+      await owner.query(
+        `insert into document_chunks (document_version_id, workspace_id, chunk_index, content, char_start, char_end, embedding, embedding_model)
+         values ($1, $2, $3, $4, 0, 20, $5::vector, 'test-embedding-model')`,
+        [targetVersion, wsTarget, g, g === 0 ? 'needle-content-zero' : `target filler ${g}`, lineVector(0.02 + 0.001 * g)],
+      );
+    }
+    await owner.query(`analyze document_chunks`);
+
+    // The trap fires only under the HNSW plan — at fixture scale the planner
+    // prefers sort-based plans which mask it entirely. `enable_sort = off`
+    // session-level on a dedicated ONE-connection pool makes every retrieval
+    // query ride a connection where the HNSW ordered scan is the only plan:
+    // deterministic, and the setting is scoped to this test's own pool.
+    const trapPool = new Pool({ connectionString: process.env.DATABASE_URL, max: 1 });
+    const trapClient = await trapPool.connect();
+    await trapClient.query(`set enable_sort = off`);
+    trapClient.release();
+    const stubbedQuery = {
+      embed: async () => lineVector(0).slice(1, -1).split(',').map(Number),
+      modelName: 'test-embedding-model',
+    } as unknown as EmbeddingService;
+    const trapRetrieval = new RetrievalService(drizzle(trapPool, { schema }), stubbedQuery, configStub());
+
+    try {
+      const response = await trapRetrieval.search(wsTarget, { query: 'needle query', topK: 50, debug: true });
+      // Pre-fix this was 0: the workspace's ENTIRE corpus was below the
+      // global cut, so the post-filtered scan starved.
+      expect(response.debug?.candidates.vector).toBe(31);
+      const contents = response.results.map((r) => r.content);
+      expect(contents).toContain('needle-content-zero');
+      // And the needle ranks first — the re-sort by distance after
+      // relaxed_order keeps RRF ranks meaningful.
+      expect(response.results[0].content).toBe('needle-content-zero');
+    } finally {
+      await trapPool.end();
+      await owner.query(`delete from workspaces where id = any($1::uuid[])`, [[wsCrowd, wsTarget]]);
+    }
+  });
+
+  /**
+   * Two document versions sharing a created_at must not make "latest indexed
+   * version" nondeterministic. Pre-fix, `distinct on` with tied keys picks an
+   * ARBITRARY row — stable for a given physical layout (so it sneaks through
+   * repeated in-process runs) but it flips across vacuums, rewrites and
+   * replicas, and the probe against the real database showed it is simply
+   * *not the max uuid*. The tiebreaker's contract is stronger than
+   * "stable": the winner must be the max-id version, deterministically,
+   * everywhere.
+   *
+   * Twenty tied versions make the arbitrary pick distinguishable from the
+   * max-id pick with certainty — if the ORDER BY ignores ties, the scan's
+   * first-encountered row is overwhelmingly unlikely to be the max uuid, and
+   * the assertion names the exact version that must win.
+   *
+   * Proven to bite: reverting `order by ..., id desc` to
+   * `order by ..., created_at desc` makes this test fail (arbitrary pick ≠
+   * max-id version).
+   */
+  it('breaks created_at ties deterministically when picking the latest version', async () => {
+    const ws = (await owner.query(`insert into workspaces (name) values ('retrieval-tiebreak') returning id`)).rows[0].id;
+    const doc = (await owner.query(`insert into documents (workspace_id, title, status) values ($1, 'tie doc', 'indexed') returning id`, [ws])).rows[0].id;
+
+    // 20 versions, IDENTICAL created_at, all 'indexed', each with its own
+    // content; remember which version holds the max uuid.
+    const sameInstant = new Date().toISOString();
+    let maxId = '';
+    for (let g = 0; g < 20; g++) {
+      const content = `tiebreak content ${g}`;
+      const versionId = (
+        await owner.query(
+          `insert into document_versions (document_id, workspace_id, object_key, original_filename, content_type, byte_size, status, created_at)
+           values ($1, $2, $3, $4, 'text/plain', 100, 'indexed', $5) returning id`,
+          [doc, ws, `k/${doc}/${g}`, `v${g}.txt`, sameInstant],
+        )
+      ).rows[0].id as string;
+      if (versionId > maxId) {
+        maxId = versionId;
+      }
+      await owner.query(
+        `insert into document_chunks (document_version_id, workspace_id, chunk_index, content, char_start, char_end, embedding, embedding_model)
+         values ($1, $2, 0, $3, 0, $4, $5::vector, 'test-embedding-model')`,
+        [versionId, ws, content, content.length, basis(0)],
+      );
+    }
+    const [maxVersion] = (await owner.query(`select id from document_versions where workspace_id = $1 and id = $2`, [ws, maxId])).rows;
+    expect(maxVersion).toBeDefined();
+    const { rows: [maxChunk] } = await owner.query(`select content from document_chunks where document_version_id = $1`, [maxId]);
+
+    try {
+      // The winner must be the max-id version's chunk — the contract of the
+      // `id desc` tiebreaker, not merely "the same one every time".
+      const response = await retrieval.search(ws, { query: 'tiebreak', topK: 10 });
+      const contents = new Set(response.results.map((r) => r.content));
+      expect(contents.size, 'both legs must return exactly one tied version').toBeLessThanOrEqual(1);
+      expect(response.results[0]?.content).toBe(maxChunk.content);
+    } finally {
+      await owner.query(`delete from workspaces where id = $1::uuid`, [ws]);
+    }
   });
 });

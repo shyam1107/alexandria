@@ -6,6 +6,7 @@ import { INGESTION_QUEUE } from './ingestion.constants';
 import { StorageService } from './storage.service';
 import { ParserService } from './parser.service';
 import { ChunkerService } from './chunker.service';
+import { EmbeddingCache } from './embedding-cache.service';
 import { EmbeddingService } from './embedding.service';
 import { DocumentService } from './document.service';
 
@@ -23,7 +24,7 @@ function redisConnection(url: string) {
     }),
     BullModule.registerQueue({ name: INGESTION_QUEUE }),
   ],
-  providers: [StorageService, ParserService, ChunkerService, EmbeddingService, DocumentService],
+  providers: [StorageService, ParserService, ChunkerService, EmbeddingCache, EmbeddingService, DocumentService],
   exports: [BullModule, StorageService, ParserService, ChunkerService, EmbeddingService, DocumentService],
 })
 export class IngestionCoreModule {}

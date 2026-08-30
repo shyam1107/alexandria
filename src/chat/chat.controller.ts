@@ -1,21 +1,55 @@
 import { Body, Controller, HttpException, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
+import type { Env } from '../config/env.schema';
 import { AccessTokenGuard, WorkspaceMemberGuard } from '../auth/auth.guards';
 import type { RequestWithAuth } from '../auth/auth.types';
+import { PreFrameDeadlineError } from './chat.errors';
+import { ChatRateLimitGuard } from './chat-rate-limit.guard';
+import { QuotaGuard } from './quota.guard';
+import { RateLimiterService } from '../rate-limit/rate-limiter.service';
 import { ChatService, type ChatSink } from './chat.service';
 import { ChatDto } from './dto/chat.dto';
-
-const HEARTBEAT_MS = 15_000;
 
 /**
  * POST + SSE over a raw response. Nest's @Sse() is built for GET + RxJS and
  * global interceptors serialize over it; with a POST body it fights you, so
  * this controller writes bytes itself. The SERVICE owns the event grammar.
+ *
+ * TWO timers guard the request, and their arming order is the Phase 7 contract:
+ *
+ * 1. The PRE-FRAME DEADLINE covers everything that must finish while the
+ *    status line is still ours: conversation resolution, idempotent replay,
+ *    history, the rewrite, retrieval. Phase 5 deliberately deferred headers
+ *    to the first frame so those failures stay real HTTP errors; the deadline
+ *    bounds how long that can take, so the error the client receives is
+ *    decided by us (503), not by a proxy idle timeout (a cut connection).
+ *    It disarms the moment the first frame is written — after that, a long
+ *    answer is legitimate and mid-stream failures are error frames by the
+ *    SSE grammar.
+ *
+ * 2. The HEARTBEAT is armed WITH the first frame, never at handler entry —
+ *    the Phase 7 race. A ping calls the same lazy write that commits the 200,
+ *    so a timer armed before the first frame could commit the status line
+ *    before the handler has decided what it is: retrieval outliving one
+ *    heartbeat interval turned a real HTTP error into an SSE error frame,
+ *    with the outcome decided by whether a timer beat a database query. A
+ *    deterministic contract beats a favourable one.
  */
 @Controller('chat')
-@UseGuards(AccessTokenGuard, WorkspaceMemberGuard)
+@UseGuards(AccessTokenGuard, WorkspaceMemberGuard, ChatRateLimitGuard, QuotaGuard)
 export class ChatController {
-  constructor(private readonly chat: ChatService) {}
+  private readonly heartbeatMs: number;
+  private readonly preFrameDeadlineMs: number;
+
+  constructor(
+    private readonly chat: ChatService,
+    private readonly limiter: RateLimiterService,
+    config: ConfigService<Env, true>,
+  ) {
+    this.heartbeatMs = config.get('CHAT_HEARTBEAT_MS', { infer: true });
+    this.preFrameDeadlineMs = config.get('CHAT_PRE_FRAME_DEADLINE_MS', { infer: true });
+  }
 
   @Post()
   async stream(@Req() request: Request & RequestWithAuth, @Body() body: ChatDto, @Res() response: Response): Promise<void> {
@@ -42,6 +76,8 @@ export class ChatController {
     const write = (chunk: string) => {
       if (!started) {
         started = true;
+        clearTimeout(preFrameTimer);
+        heartbeat = setInterval(() => write(': ping\n\n'), this.heartbeatMs);
         response.writeHead(200, {
           'content-type': 'text/event-stream',
           'cache-control': 'no-cache',
@@ -55,11 +91,28 @@ export class ChatController {
     };
     const sink: ChatSink = { event: (name, data) => write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`) };
 
-    // Heartbeat comments: a cold model load is 10–30s before the first
-    // delta, and idle proxies kill connections at 30–60s.
-    const heartbeat = setInterval(() => write(': ping\n\n'), HEARTBEAT_MS);
+    // The pre-frame deadline: armed BEFORE the service runs, disarmed inside
+    // write() when the first frame commits. Aborting with a REASON is the
+    // Phase 6 pattern — it keeps "our deadline fired" distinguishable from
+    // "the client hung up", which the persistence path reads differently.
+    //
+    // The await is a RACE, not a bare await: cooperative cancellation needs
+    // every awaited operation to actually observe the signal, and the
+    // deadline must not depend on that chain being unbroken all the way down
+    // (a hung DB driver, a provider that ignores the signal). If nothing
+    // starts the stream before the deadline, the deadline wins and the
+    // client gets a real 503 — deterministically, not "as soon as something
+    // downstream happens to throw".
+    let heartbeat: NodeJS.Timeout | undefined;
+    let preFrameTimer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      preFrameTimer = setTimeout(() => {
+        abort.abort(new PreFrameDeadlineError());
+        reject(new PreFrameDeadlineError());
+      }, this.preFrameDeadlineMs);
+    });
     try {
-      await this.chat.streamChat(request.workspaceId!, request.user!.userId, body, sink, abort.signal);
+      await Promise.race([this.chat.streamChat(request.workspaceId!, request.user!.userId, body, sink, abort.signal), deadline]);
     } catch (error) {
       if (!started) {
         // Only HTTP exceptions keep their message: relaying a raw
@@ -69,12 +122,23 @@ export class ChatController {
           response.status(error.getStatus()).json({ message: error.message });
           return;
         }
+        // Our own deadline is a 503 — a transient "the pipeline could not
+        // start in time", not the client's fault and not a provider outage
+        // we want lumped into generic 502s in the status-class metric.
+        if (error instanceof PreFrameDeadlineError) {
+          response.status(503).json({ message: 'Chat failed to start in time' });
+          return;
+        }
         response.status(502).json({ message: 'Chat failed' });
         return;
       }
       sink.event('error', { message: 'Chat failed before the stream completed' });
     } finally {
-      clearInterval(heartbeat);
+      clearTimeout(preFrameTimer);
+      if (heartbeat) clearInterval(heartbeat);
+      // Early lease release for a cleanly-ended stream; the lease TTL covers
+      // the crash case. Guard-thrown denials never registered a lease.
+      if (request.streamLease) await this.limiter.releaseLease(request.streamLease.key, request.streamLease.id);
       if (!response.writableEnded) response.end();
     }
   }

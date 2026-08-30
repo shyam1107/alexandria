@@ -16,3 +16,5 @@ coverage/
 .eslintcache
 *.tsbuildinfo
 CLAUDE.md
+# Local latency measurement output (pnpm measure:p95)
+measure-p95*.txt

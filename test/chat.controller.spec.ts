@@ -1,11 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { NotFoundException, ValidationPipe, VersioningType } from '@nestjs/common';
-import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Test } from '@nestjs/testing';
 import type { AddressInfo } from 'node:net';
 import { ChatController } from '../src/chat/chat.controller';
 import { ChatService, type ChatSink } from '../src/chat/chat.service';
 import { AccessTokenGuard, WorkspaceMemberGuard } from '../src/auth/auth.guards';
+import { ChatRateLimitGuard } from '../src/chat/chat-rate-limit.guard';
+import { QuotaGuard } from '../src/chat/quota.guard';
+import { UsageLedger } from '../src/llm/usage-ledger';
+import { RateLimiterService } from '../src/rate-limit/rate-limiter.service';
 import type { RequestWithAuth } from '../src/auth/auth.types';
 
 /**
@@ -25,8 +30,20 @@ import type { RequestWithAuth } from '../src/auth/auth.types';
  * AbortController.
  */
 
-const WORKSPACE_ID = '11111111-1111-1111-1111-111111111111';
+const WORKSPACE_ID = '11111111-1111-1111-1111-1111-111111111111';
 const USER_ID = '22222222-2222-2222-2222-222222222222';
+
+// The controller reads CHAT_HEARTBEAT_MS and CHAT_PRE_FRAME_DEADLINE_MS from
+// config. Tests pin them tight so deadlines fire inside a test's lifetime;
+// production defaults (15s / 20s) are far too slow to wait for.
+const controllerConfig = (overrides: { CHAT_PRE_FRAME_DEADLINE_MS?: number } = {}) => {
+  const values: Record<string, number> = {
+    CHAT_HEARTBEAT_MS: 2_000,
+    CHAT_PRE_FRAME_DEADLINE_MS: 10_000,
+    ...overrides,
+  };
+  return { get: (key: string): number => values[key] } as never;
+};
 
 /** Records what the service saw, so tests can assert on the signal it was handed. */
 class FakeChatService {
@@ -54,12 +71,35 @@ describe('POST /chat (SSE over a real socket)', () => {
 
   beforeAll(async () => {
     service = new FakeChatService();
+    ({ app, url } = await buildApp());
+  });
+
+  afterAll(async () => {
+    if (app) await app.close();
+  });
+
+  /**
+   * Boots the controller over a real socket with the given config overrides.
+   * The shared beforeAll uses defaults; deadline tests build a private
+   * instance with a tight CHAT_PRE_FRAME_DEADLINE_MS so they finish fast.
+   */
+  async function buildApp(overrides: { CHAT_PRE_FRAME_DEADLINE_MS?: number } = {}) {
+    // The shared app injects `service`, whose behaviour tests mutate per-case.
+    // A deadline-override app gets its own FakeChatService (whose default
+    // behaviour is overridden by the test) so it cannot interfere with the
+    // shared one.
+    const instance = overrides.CHAT_PRE_FRAME_DEADLINE_MS === undefined ? service : new FakeChatService();
     const moduleRef = await Test.createTestingModule({
       controllers: [ChatController],
-      providers: [{ provide: ChatService, useValue: service }],
+      providers: [
+        { provide: ChatService, useValue: instance },
+        { provide: ConfigService, useValue: controllerConfig(overrides) },
+        // The real limiter needs Redis; the controller only uses it to
+        // release the stream lease in finally. The limiter's behaviour is
+        // covered by its own integration suite against real Redis.
+        { provide: RateLimiterService, useValue: { releaseLease: async () => undefined } },
+      ],
     })
-      // The guards are Phase 2's and are tested there; here they only need to
-      // populate the request the way a real authenticated call would.
       .overrideGuard(AccessTokenGuard)
       .useValue({
         canActivate: (context: { switchToHttp: () => { getRequest: () => RequestWithAuth } }) => {
@@ -67,6 +107,15 @@ describe('POST /chat (SSE over a real socket)', () => {
           return true;
         },
       })
+      // The rate-limit guard is Phase 7's and has its own integration suite
+      // (rate-limit.integration.spec); here it would need a real Redis, so
+      // it is overridden to plain-allow, exactly like the Phase 2 guards.
+      .overrideGuard(ChatRateLimitGuard)
+      .useValue({ canActivate: () => true })
+      // Same for the quota guard: quota behaviour is covered by
+      // quota.integration.spec against real Redis + Postgres.
+      .overrideGuard(QuotaGuard)
+      .useValue({ canActivate: () => true })
       .overrideGuard(WorkspaceMemberGuard)
       .useValue({
         canActivate: (context: { switchToHttp: () => { getRequest: () => RequestWithAuth } }) => {
@@ -76,20 +125,17 @@ describe('POST /chat (SSE over a real socket)', () => {
       })
       .compile();
 
-    app = moduleRef.createNestApplication();
-    // Mirror main.ts so the route and body handling match production.
+    const app = moduleRef.createNestApplication();
     app.setGlobalPrefix('api');
     app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
     await app.init();
     await app.listen(0);
     const { port } = app.getHttpServer().address() as AddressInfo;
-    url = `http://127.0.0.1:${port}/api/v1/chat`;
-  });
-
-  afterAll(async () => {
-    if (app) await app.close();
-  });
+    const url = `http://127.0.0.1:${port}/api/v1/chat`;
+    const post = (body: unknown) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    return { app, url, post, instance };
+  }
 
   const post = (body: unknown, init: RequestInit = {}) =>
     fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), ...init });
@@ -209,5 +255,158 @@ describe('POST /chat (SSE over a real socket)', () => {
     expect(response.status).toBe(200);
     expect(body).toContain('event: error');
     expect(body).not.toContain('provider exploded');
+  });
+
+  /**
+   * THE PHASE 7 HEARTBEAT CONTRACT. The ping and the first frame share the
+   * same lazy write that commits the 200 — so a heartbeat armed at handler
+   * entry could commit the status line before the handler decided what it
+   * was, converting a retrieval failure into a 200 + error frame depending
+   * on whether a timer beat a database query. The fix: arm the heartbeat
+   * WITH the first frame. The observable contract, asserted over a real
+   * socket: a service that sits silent well past one heartbeat interval
+   * BEFORE the first frame sends NOTHING (no ping commits the 200), and a
+   * real HTTP error can still follow.
+   *
+   * Proven to bite: arming the heartbeat at handler entry makes this test
+   * fail — the ping writes ': ping' and commits the 200 before the service
+   * throws, so the response becomes 200 + error frame instead of 503.
+   */
+  it('never lets a heartbeat commit the status before the first frame', async () => {
+    // Heartbeat interval is 2000ms (pinned in controllerConfig). The service
+    // stays silent 2500ms — past one full interval — then fails.
+    service.behaviour = async () => {
+      await delay(2_500);
+      throw new Error('retrieval was slow and then it failed');
+    };
+    const response = await post({ message: 'slow then failing' });
+    const body = await response.text();
+
+    // Not 200: no ping may commit the status line while the handler is still
+    // deciding. And no ping bytes on the wire at all.
+    expect(response.status).toBe(502);
+    expect(response.headers.get('content-type')).toContain('application/json');
+    expect(body).not.toContain(': ping');
+  });
+
+  /**
+   * The pre-frame deadline (option c): a request that cannot start in time
+   * is OUR error, decided by us, not a proxy idle-timeout cut. 503 — the
+   * pipeline could not start — not 502, so status-class metrics distinguish
+   * "slow start" from "failure".
+   *
+   * Proven to bite: removing the deadline timer leaves this test hanging on
+   * the client until its own fetch times out.
+   */
+  it('cuts a pre-frame stall with a real 503 before the first frame', async () => {
+    // The service never emits a frame and never returns; the deadline (pinned
+    // at 300ms for this test via its own app instance) must cut it.
+    const stall = await buildApp({ CHAT_PRE_FRAME_DEADLINE_MS: 300 });
+    (stall.instance as FakeChatService).behaviour = () => new Promise<void>(() => undefined);
+    const response = await stall.post({ message: 'stall forever' });
+
+    expect(response.status).toBe(503);
+    const body = (await response.json()) as { message: string };
+    expect(body.message).toBe('Chat failed to start in time');
+    await stall.app.close();
+  });
+
+  /**
+   * The Phase 7 rate-limit contract, end to end: a denied request is a real
+   * HTTP 429 BEFORE any SSE frame — the guard chain must fire ahead of the
+   * handler, so the lazy 200-commit is never reached. This is the exact
+   * placement property the heartbeat work protects, asserted from the wire.
+   */
+  it('answers a rate-limited chat with a real 429, not an SSE error frame', async () => {
+    const { Redis } = await import('ioredis');
+    const redis = new Redis(process.env.REDIS_URL!);
+    try {
+      // Simulate a workspace at its concurrent-stream cap: 5 live leases.
+      for (let i = 0; i < 5; i++) await redis.zadd(`rl:chat:streams:${WORKSPACE_ID}`, Date.now() + 60_000, `spec-${i}`);
+
+      const moduleRef = await Test.createTestingModule({
+        controllers: [ChatController],
+        providers: [
+          { provide: ChatService, useValue: service },
+          { provide: ConfigService, useValue: controllerConfig() },
+          { provide: RateLimiterService, useValue: new RateLimiterService(redis) },
+          // The quota guard sits AFTER the rate-limit guard in the chain;
+          // the 429 must fire before quota is even consulted. Stubbed to
+          // allow — quota denial has its own test.
+          { provide: UsageLedger, useValue: { withinBudget: async () => true, record: async () => undefined, consumedSoFar: async () => 0 } },
+        ],
+      })
+        .overrideGuard(AccessTokenGuard)
+        .useValue({ canActivate: (context: { switchToHttp: () => { getRequest: () => RequestWithAuth } }) => { context.switchToHttp().getRequest().user = { userId: USER_ID, email: 'x@example.com' }; return true; } })
+        .overrideGuard(WorkspaceMemberGuard)
+        .useValue({ canActivate: (context: { switchToHttp: () => { getRequest: () => RequestWithAuth } }) => { context.switchToHttp().getRequest().workspaceId = WORKSPACE_ID; return true; } })
+        .compile();
+
+      const rlApp = moduleRef.createNestApplication();
+      rlApp.setGlobalPrefix('api');
+      rlApp.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+      rlApp.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+      await rlApp.init();
+      await rlApp.listen(0);
+      const { port } = rlApp.getHttpServer().address() as AddressInfo;
+
+      const response = await fetch(`http://127.0.0.1:${port}/api/v1/chat`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: 'limit me' }),
+      });
+      const text = await response.text();
+
+      expect(response.status).toBe(429);
+      expect(response.headers.get('content-type')).toContain('application/json');
+      expect(text).not.toContain('event:');
+
+      await rlApp.close();
+    } finally {
+      await redis.del(`rl:chat:streams:${WORKSPACE_ID}`);
+      await redis.quit();
+    }
+  });
+
+  /**
+   * Quota exhaustion, end to end: an over-budget workspace gets a real 402
+   * BEFORE any SSE frame — pre-frame placement, same contract as the 429.
+   * 402, not 429: "budget exhausted" is a plan state, not a rate problem.
+   */
+  it('answers an over-budget workspace with a real 402, not an SSE error frame', async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [ChatController],
+      providers: [
+        { provide: ChatService, useValue: service },
+        { provide: ConfigService, useValue: controllerConfig() },
+        { provide: RateLimiterService, useValue: { releaseLease: async () => undefined, consume: async () => true, acquireLease: async () => true, checkLogin: async () => true } },
+        { provide: UsageLedger, useValue: { withinBudget: async () => false, record: async () => undefined, consumedSoFar: async () => 999_999_999 } },
+      ],
+    })
+      .overrideGuard(AccessTokenGuard)
+      .useValue({ canActivate: (context: { switchToHttp: () => { getRequest: () => RequestWithAuth } }) => { context.switchToHttp().getRequest().user = { userId: USER_ID, email: 'x@example.com' }; return true; } })
+      .overrideGuard(WorkspaceMemberGuard)
+      .useValue({ canActivate: (context: { switchToHttp: () => { getRequest: () => RequestWithAuth } }) => { context.switchToHttp().getRequest().workspaceId = WORKSPACE_ID; return true; } })
+      .compile();
+
+    const quotaApp = moduleRef.createNestApplication();
+    quotaApp.setGlobalPrefix('api');
+    quotaApp.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
+    quotaApp.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+    await quotaApp.init();
+    await quotaApp.listen(0);
+    const { port } = quotaApp.getHttpServer().address() as AddressInfo;
+
+    const response = await fetch(`http://127.0.0.1:${port}/api/v1/chat`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: 'budget me' }),
+    });
+    const text = await response.text();
+
+    expect(response.status).toBe(402);
+    expect(text).not.toContain('event:');
+
+    await quotaApp.close();
   });
 });

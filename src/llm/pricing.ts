@@ -28,8 +28,19 @@ const PRICES: Record<string, PriceEntry> = {
   // kind: an unknown model must never read as $0 (see computeCostMicroUsd).
   'ollama/gpt-oss:120b': { promptMicroUsdPerMillion: 0n, completionMicroUsdPerMillion: 0n },
   'ollama/nomic-embed-text': { promptMicroUsdPerMillion: 0n, completionMicroUsdPerMillion: 0n },
-  // gemini-2.0-flash: $0.10 / $0.40 per 1M input/output tokens.
-  'gemini/gemini-2.0-flash': { promptMicroUsdPerMillion: 100_000n, completionMicroUsdPerMillion: 400_000n },
+  // Gemini paid-tier standard rates, verified against ai.google.dev/gemini-api/docs/pricing
+  // on 2026-08-30. gemini-2.0-flash is GONE — the live API returns 404 with
+  // "no longer available" — so its entry is removed rather than left to rot:
+  // a price for a model that cannot be called is worse than no price, because
+  // the fail-closed boot check would happily approve it.
+  //
+  // NOTE for whoever reads this in 2027: gemini-3.6-flash is $0.75/$3.75
+  // only THROUGH 2026-12-31, then doubles to $1.50/$7.50. A dated price in a
+  // static table is a diff someone must remember to make; the alternative
+  // (fetching live prices) makes billing depend on a network call.
+  'gemini/gemini-3.1-flash-lite': { promptMicroUsdPerMillion: 250_000n, completionMicroUsdPerMillion: 1_500_000n },
+  'gemini/gemini-2.5-flash': { promptMicroUsdPerMillion: 300_000n, completionMicroUsdPerMillion: 2_500_000n },
+  'gemini/gemini-3.6-flash': { promptMicroUsdPerMillion: 750_000n, completionMicroUsdPerMillion: 3_750_000n },
   // The test double: declared zero so pipeline tests exercising the real
   // ledger see a real (free) price, not the unknown-model NULL path.
   'scripted/scripted': { promptMicroUsdPerMillion: 0n, completionMicroUsdPerMillion: 0n },
@@ -69,4 +80,18 @@ export function computeCostMicroUsd(
   const prompt = BigInt(promptTokens ?? 0) * price.promptMicroUsdPerMillion;
   const completion = BigInt(completionTokens ?? 0) * price.completionMicroUsdPerMillion;
   return (prompt + completion) / MILLION;
+}
+
+/**
+ * Whether a (provider, model) pair has a DECLARED price. Phase 7 quota
+ * enforcement fails CLOSED on unpriced models: a model whose spend cannot
+ * be computed cannot be bounded, and "unpriced therefore unlimited" is the
+ * exact silent-$0 trap this file exists to prevent — the Phase 6 lesson,
+ * applied to enforcement instead of measurement. The quota guard denies
+ * requests when the active chain would run an unpriced model; the fix is
+ * always "declare the price", never "broaden the quota".
+ */
+export function isPriced(provider: string | null, model: string | null): boolean {
+  if (!provider || !model) return false;
+  return PRICES[`${provider}/${model}`] !== undefined;
 }
