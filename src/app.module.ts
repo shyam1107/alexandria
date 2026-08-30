@@ -8,6 +8,8 @@ import { HealthModule } from './health/health.module';
 import { RedisModule } from './redis/redis.module';
 import { IngestionApiModule } from './ingestion/ingestion-api.module';
 import { RetrievalModule } from './retrieval/retrieval.module';
+import { LlmModule } from './llm/llm.module';
+import { ChatModule } from './chat/chat.module';
 import { AuthModule } from './auth/auth.module';
 
 @Module({
@@ -36,6 +38,8 @@ import { AuthModule } from './auth/auth.module';
     HealthModule,
     IngestionApiModule,
     RetrievalModule,
+    LlmModule,
+    ChatModule,
     AuthModule,
   ],
 })

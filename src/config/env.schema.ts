@@ -39,6 +39,32 @@ export const envSchema = z.object({
 
   OLLAMA_BASE_URL: z.string().default('http://localhost:11434'),
   GEMINI_API_KEY: z.string().optional(),
+
+  // Generation (Phase 5). OLLAMA_API_KEY stays optional: local Ollama has no
+  // auth, and the provider sends the Bearer header only when this is set —
+  // same code path for localhost and ollama.com.
+  OLLAMA_API_KEY: z.string().optional(),
+  LLM_DRIVER: z.enum(['ollama', 'scripted']).default('ollama'),
+  GENERATION_MODEL: z.string().default('gpt-oss:120b'),
+  // Ollama defaults num_ctx to 2048 regardless of the model's advertised
+  // window and then silently truncates the FRONT of the prompt — where the
+  // system prompt lives. Always send it explicitly.
+  GENERATION_NUM_CTX: z.coerce.number().int().positive().default(8192),
+  GENERATION_MAX_TOKENS: z.coerce.number().int().positive().default(1024),
+  // Grounded, cite-your-sources answering is not a creative task. Ollama's
+  // default is 0.8, which measurably increases both invention and citation
+  // drift — the behaviour Phase 8 exists to measure, so it must be pinned and
+  // configurable rather than inherited.
+  GENERATION_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.2),
+  CHAT_HISTORY_MESSAGES: z.coerce.number().int().positive().default(10),
+  // A message COUNT is not a size bound: ten turns of 4000-char questions and
+  // 1024-token answers is ~10k tokens on its own. History is capped by tokens
+  // too, and the oldest turns are dropped first.
+  CHAT_HISTORY_TOKEN_BUDGET: z.coerce.number().int().positive().default(1500),
+  // A ceiling, not an allocation: the effective context budget is the smaller
+  // of this and whatever the model's window has left after the system prompt,
+  // history, the question, and the reserved output.
+  CHAT_CONTEXT_TOKEN_BUDGET: z.coerce.number().int().positive().default(3000),
 });
 
 export type Env = z.infer<typeof envSchema>;

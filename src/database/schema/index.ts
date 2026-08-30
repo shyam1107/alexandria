@@ -8,10 +8,10 @@
  *  - Phase 6: usage/token ledger
  */
 import { sql } from 'drizzle-orm';
-import { customType, index, integer, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
-import { documentStatus, membershipRole, refreshTokenStatus } from './enums';
+import { boolean, customType, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import { documentStatus, membershipRole, messageRole, refreshTokenStatus } from './enums';
 
-export { documentStatus, membershipRole, refreshTokenStatus } from './enums';
+export { documentStatus, membershipRole, messageRole, refreshTokenStatus } from './enums';
 
 const vector = customType<{ data: number[]; driverData: string }>({
 	dataType() {
@@ -133,4 +133,52 @@ export const documentChunks = pgTable('document_chunks', {
 	// Default m=16 / ef_construction=64 — tune ef_search per query, not here.
 	index('document_chunks_embedding_hnsw_idx').using('hnsw', table.embedding.op('vector_cosine_ops')),
 	index('document_chunks_search_vector_gin_idx').using('gin', table.searchVector),
+]);
+
+export const conversations = pgTable('conversations', {
+	id: uuid('id').defaultRandom().primaryKey(),
+	workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+	createdBy: uuid('created_by').notNull().references(() => users.id, { onDelete: 'cascade' }),
+	title: varchar('title', { length: 255 }),
+	createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+	updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+	index('conversations_workspace_idx').on(table.workspaceId),
+]);
+
+export const messages = pgTable('messages', {
+	id: uuid('id').defaultRandom().primaryKey(),
+	conversationId: uuid('conversation_id').notNull().references(() => conversations.id, { onDelete: 'cascade' }),
+	// Denormalized (same pattern as document_chunks) so the RLS policy reads
+	// the row itself instead of joining through conversations.
+	workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+	// Explicit ordering: created_at ties between a user turn and its answer
+	// would make history order nondeterministic.
+	seq: integer('seq').notNull(),
+	role: messageRole('role').notNull(),
+	content: text('content').notNull(),
+	// Client-supplied idempotency key: a retry after a crash replays the
+	// stored answer instead of duplicating the turn (and paying for it again).
+	clientMessageId: varchar('client_message_id', { length: 128 }),
+	// The RESOLVED citation map ([n] -> chunk + span as served), not the raw
+	// markers — a re-ingestion changes chunk ids, and this row is the only
+	// record of what the answer pointed at when it was written.
+	citations: jsonb('citations'),
+	// Count of [n] markers with no corresponding context item. Persisted from
+	// Phase 5 so Phase 8's faithfulness harness has a baseline waiting for it.
+	unresolvedCitations: integer('unresolved_citations'),
+	promptTokens: integer('prompt_tokens'),
+	completionTokens: integer('completion_tokens'),
+	model: varchar('model', { length: 128 }),
+	provider: varchar('provider', { length: 64 }),
+	promptVersion: varchar('prompt_version', { length: 32 }),
+	// partial = stream ended without a done event (client disconnect or
+	// provider failure mid-answer). finish_reason distinguishes them.
+	partial: boolean('partial').default(false).notNull(),
+	finishReason: varchar('finish_reason', { length: 16 }),
+	createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+	uniqueIndex('messages_conversation_seq_idx').on(table.conversationId, table.seq),
+	uniqueIndex('messages_conversation_client_idx').on(table.conversationId, table.clientMessageId),
+	index('messages_workspace_idx').on(table.workspaceId),
 ]);

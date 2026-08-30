@@ -12,5 +12,7 @@ import { RetrievalService } from './retrieval.service';
   imports: [IngestionCoreModule, AuthModule],
   controllers: [RetrievalController],
   providers: [RetrievalService],
+  // Exported for the chat module: chat consumes retrieval as-is.
+  exports: [RetrievalService],
 })
 export class RetrievalModule {}
