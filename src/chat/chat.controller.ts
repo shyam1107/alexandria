@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, HttpException, Post, Req, Res, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { AccessTokenGuard, WorkspaceMemberGuard } from '../auth/auth.guards';
 import type { RequestWithAuth } from '../auth/auth.types';
@@ -62,8 +62,14 @@ export class ChatController {
       await this.chat.streamChat(request.workspaceId!, request.user!.userId, body, sink, abort.signal);
     } catch (error) {
       if (!started) {
-        const status = error instanceof Error && 'status' in error ? (error as { status: number }).status : 502;
-        response.status(status).json({ message: error instanceof Error ? error.message : 'Chat failed' });
+        // Only HTTP exceptions keep their message: relaying a raw
+        // error.message would happily hand the client a Postgres error
+        // string or a vendor response body. Everything else is generic.
+        if (error instanceof HttpException) {
+          response.status(error.getStatus()).json({ message: error.message });
+          return;
+        }
+        response.status(502).json({ message: 'Chat failed' });
         return;
       }
       sink.event('error', { message: 'Chat failed before the stream completed' });

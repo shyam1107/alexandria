@@ -63,9 +63,13 @@ export class RetrievalService {
     const topK = dto.topK ?? 10;
     // If the embedding provider is down the whole search fails — deliberate.
     // Degrading silently to FTS-only would hide the outage behind slightly
-    // worse answers; fallback chains belong to the Phase 6 provider layer,
-    // where they can be designed (and alerted on) properly.
-    const queryVector = `[${(await this.embeddings.embed(dto.query)).join(',')}]`;
+    // worse answers served through the same SSE grammar with the same
+    // citation chips: "search got subtly worse on Tuesday" is an incident
+    // nobody could reconstruct. Retries and timeouts live in
+    // EmbeddingService; a persistent outage presents as one (HTTP 502 before
+    // the first frame). An EXPLICIT degraded mode (marker in the sources
+    // frame) is a Phase 7 design.
+    const queryVector = `[${(await this.embeddings.embed(dto.query, { workspaceId, operation: 'embedding_query' })).join(',')}]`;
 
     const { vectorRows, ftsRows } = await withWorkspace(this.db, workspaceId, async (tx) => {
       const vectorRows = await this.vectorLeg(tx, workspaceId, queryVector, dto.documentId);

@@ -2,13 +2,15 @@ import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.schema';
 import { LLM_PROVIDER } from '../llm/llm.constants';
+import { LlmProviderError, LlmTimeoutError, PromptBlockedError } from '../llm/llm.errors';
 import type { LlmEvent, LlmProvider, Message } from '../llm/llm.types';
+import { UsageLedger } from '../llm/usage-ledger';
 import { RetrievalService } from '../retrieval/retrieval.service';
 import { assembleContext, trimHistory } from './context-assembler';
 import { extractCitations } from './citations';
 import { ConversationRepository } from './conversation.repository';
 import { QueryRewriterService } from './query-rewriter.service';
-import { ANSWER_SYSTEM_PROMPT, NO_CONTEXT_REFUSAL, PROMPT_VERSION, buildAnswerUserMessage } from './prompt';
+import { ANSWER_SYSTEM_PROMPT, BLOCKED_REFUSAL, NO_CONTEXT_REFUSAL, PROMPT_VERSION, buildAnswerUserMessage } from './prompt';
 import type { ChatDto } from './dto/chat.dto';
 import type { ContextSource } from './context-assembler';
 
@@ -50,6 +52,7 @@ export class ChatService {
     private readonly retrieval: RetrievalService,
     private readonly rewriter: QueryRewriterService,
     @Inject(LLM_PROVIDER) private readonly llm: LlmProvider,
+    private readonly ledger: UsageLedger,
     config: ConfigService<Env, true>,
   ) {
     this.historyLimit = config.get('CHAT_HISTORY_MESSAGES', { infer: true });
@@ -116,7 +119,7 @@ export class ChatService {
     }
 
     // 4. Rewrite only pays for itself on follow-ups; first turns skip it.
-    const { query, rewritten } = await this.rewriter.rewrite(dto.message, history, signal);
+    const { query, rewritten } = await this.rewriter.rewrite(dto.message, history, workspaceId, signal);
 
     // 5. Retrieval — its own transaction, committed before generation starts.
     const search = await this.retrieval.search(workspaceId, { query, topK: RETRIEVAL_TOP_K, debug: dto.debug });
@@ -180,7 +183,7 @@ export class ChatService {
     ];
     let answer = '';
     let doneEvent: Extract<LlmEvent, { type: 'done' }> | null = null;
-    let failed = false;
+    let streamError: unknown = null;
     try {
       for await (const event of this.llm.stream({
         messages: prompt,
@@ -188,6 +191,7 @@ export class ChatService {
         // Pinned, not inherited: Ollama defaults to 0.8, and a grounded
         // cite-your-sources answer is not a creative task.
         temperature: this.temperature,
+        purpose: 'answer',
         signal,
       })) {
         if (event.type === 'delta') {
@@ -197,25 +201,78 @@ export class ChatService {
           doneEvent = event;
         }
       }
-    } catch {
+    } catch (error) {
       // Abort (client gone) and provider failure land here alike; the sink
       // guards its own writes, so emitting is safe either way — but a
-      // disconnected client must not get an error frame it can't read.
-      failed = true;
-      if (!signal.aborted) sink.event('error', { conversationId, message: 'Generation failed mid-stream' });
+      // disconnected client must not get an error frame it can't read. A
+      // safety block gets its own deterministic refusal below, not the
+      // generic failure frame.
+      streamError = error;
+      if (!signal.aborted && !(error instanceof PromptBlockedError)) {
+        sink.event('error', { conversationId, message: 'Generation failed mid-stream' });
+      }
     }
 
-    if (failed || !doneEvent) {
+    // A pre-generation safety block is NOT a failure and NOT an empty
+    // answer: it is a deterministic refusal with its own literal, because
+    // "the corpus doesn't say" and "the provider refused the prompt" must
+    // never read the same to a user. Emitting the full grammar keeps the
+    // client free of special cases; persisting an empty assistant turn would
+    // poison history.
+    if (streamError instanceof PromptBlockedError) {
+      sink.event('delta', { text: BLOCKED_REFUSAL });
+      sink.event('usage', { promptTokens: 0, completionTokens: 0 });
+      sink.event('done', { conversationId, finishReason: 'content_filter', model: streamError.model ?? null, unresolvedCitations: [] });
+      const row = await this.repo.insertMessage(workspaceId, {
+        conversationId,
+        role: 'assistant',
+        content: BLOCKED_REFUSAL,
+        provider: streamError.provider,
+        model: streamError.model,
+        promptVersion: PROMPT_VERSION,
+        finishReason: 'content_filter',
+      });
+      await this.ledger.record(workspaceId, {
+        operation: 'chat_answer',
+        provider: streamError.provider,
+        model: streamError.model,
+        success: false,
+        errorKind: 'prompt_blocked',
+        messageId: row.id,
+      });
+      return;
+    }
+
+    if (streamError || !doneEvent) {
       // Partial answers are still context: history that silently drops them
       // makes the next follow-up confusing. Flagged, never hidden.
-      await this.repo.insertMessage(workspaceId, {
+      //
+      // Attribution comes from the ERROR, never from the injected composite:
+      // with a fallback chain, this.llm.name is the chain's name. Both
+      // provider errors and our own deadlines know which member they were
+      // talking to; only a provider error knows the model. A timeout row
+      // with provider NULL would drop attribution for exactly the failure
+      // class most worth attributing ("which vendor is timing out on us?").
+      // A client disconnect genuinely knows neither, and says so.
+      const failedProvider =
+        streamError instanceof LlmProviderError || streamError instanceof LlmTimeoutError ? streamError.provider : undefined;
+      const failedModel = streamError instanceof LlmProviderError ? streamError.model : undefined;
+      const row = await this.repo.insertMessage(workspaceId, {
         conversationId,
         role: 'assistant',
         content: answer,
         partial: true,
         finishReason: 'error',
-        provider: this.llm.name,
+        provider: failedProvider,
         promptVersion: PROMPT_VERSION,
+      });
+      await this.ledger.record(workspaceId, {
+        operation: 'chat_answer',
+        provider: failedProvider,
+        model: failedModel,
+        success: false,
+        errorKind: signal.aborted ? 'client_disconnect' : streamError instanceof LlmTimeoutError ? 'timeout' : 'provider_error',
+        messageId: row.id,
       });
       return;
     }
@@ -233,7 +290,10 @@ export class ChatService {
     });
 
     // 11. Persist — its own transaction, after the stream has terminated.
-    await this.repo.insertMessage(workspaceId, {
+    //     provider comes from the DONE event, never from the injected
+    //     composite: with a fallback chain, this.llm.name is the chain's
+    //     name and the ledger becomes a lie the moment a fallback fires.
+    const row = await this.repo.insertMessage(workspaceId, {
       conversationId,
       role: 'assistant',
       content: answer,
@@ -242,9 +302,18 @@ export class ChatService {
       promptTokens: doneEvent.usage.promptTokens,
       completionTokens: doneEvent.usage.completionTokens,
       model: doneEvent.model,
-      provider: this.llm.name,
+      provider: doneEvent.provider,
       promptVersion: PROMPT_VERSION,
       finishReason: doneEvent.finishReason,
+    });
+    await this.ledger.record(workspaceId, {
+      operation: 'chat_answer',
+      provider: doneEvent.provider,
+      model: doneEvent.model,
+      promptTokens: doneEvent.usage.promptTokens,
+      completionTokens: doneEvent.usage.completionTokens,
+      success: true,
+      messageId: row.id,
     });
   }
 

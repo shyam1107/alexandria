@@ -46,3 +46,12 @@ export function buildRewriteUserMessage(history: Array<{ role: string; content: 
  * literal never does.
  */
 export const NO_CONTEXT_REFUSAL = "I don't have enough information in this workspace's documents to answer that question.";
+
+/**
+ * The safety-block refusal. Deliberately a DIFFERENT literal from
+ * NO_CONTEXT_REFUSAL: "the corpus doesn't say" and "the provider refused
+ * the prompt" must never read the same to a user debugging an answer. Also
+ * deterministic — no LLM call — because the provider just told us not to
+ * ask.
+ */
+export const BLOCKED_REFUSAL = "I'm not able to answer that question.";

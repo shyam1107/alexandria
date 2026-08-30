@@ -8,10 +8,10 @@
  *  - Phase 6: usage/token ledger
  */
 import { sql } from 'drizzle-orm';
-import { boolean, customType, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
-import { documentStatus, membershipRole, messageRole, refreshTokenStatus } from './enums';
+import { bigint, boolean, customType, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid, varchar } from 'drizzle-orm/pg-core';
+import { documentStatus, llmOperation, membershipRole, messageRole, refreshTokenStatus } from './enums';
 
-export { documentStatus, membershipRole, messageRole, refreshTokenStatus } from './enums';
+export { documentStatus, llmOperation, membershipRole, messageRole, refreshTokenStatus } from './enums';
 
 const vector = customType<{ data: number[]; driverData: string }>({
 	dataType() {
@@ -181,4 +181,53 @@ export const messages = pgTable('messages', {
 	uniqueIndex('messages_conversation_seq_idx').on(table.conversationId, table.seq),
 	uniqueIndex('messages_conversation_client_idx').on(table.conversationId, table.clientMessageId),
 	index('messages_workspace_idx').on(table.workspaceId),
+]);
+
+/**
+ * The per-tenant cost ledger: one append-only row per provider call of ANY
+ * kind — answers, query rewrites, index and query embeddings. `messages`
+ * keeps its token columns as the per-answer view; they only ever covered the
+ * answer call, which is not even the majority of calls.
+ *
+ * Money is integer micro-USD in a bigint, never a float: floats accumulate
+ * representation error in exactly the SUM() a cost dashboard runs, and
+ * numeric round-trips through JS as a string inviting parseFloat. bigint is
+ * exact in Postgres AND in the language.
+ *
+ * cost_micro_usd is NULLABLE on purpose: an unknown (provider, model) price
+ * must read as NULL — loudly countable — never as 0, which is how a cost
+ * dashboard shows $0 for a month for a model nobody added to the price
+ * table. Zero is only ever a DECLARED price (self-hosted / flat
+ * subscription), never a default.
+ *
+ * Token columns are nullable too: usage only arrives on a stream's terminal
+ * frame, so a failed or aborted call genuinely does not know them. Estimated
+ * tokens in a ledger are how finance stops trusting it.
+ *
+ * provider/model are nullable for a narrower reason than they look: a
+ * provider error and one of our own deadlines both name the chain member
+ * they were talking to, and that name is recorded. What genuinely knows
+ * neither is a client disconnect — nothing failed, so nothing reported.
+ */
+export const llmUsageEvents = pgTable('llm_usage_events', {
+	id: uuid('id').defaultRandom().primaryKey(),
+	workspaceId: uuid('workspace_id').notNull().references(() => workspaces.id, { onDelete: 'cascade' }),
+	operation: llmOperation('operation').notNull(),
+	provider: varchar('provider', { length: 64 }),
+	model: varchar('model', { length: 128 }),
+	promptTokens: integer('prompt_tokens'),
+	completionTokens: integer('completion_tokens'),
+	costMicroUsd: bigint('cost_micro_usd', { mode: 'bigint' }),
+	success: boolean('success').notNull(),
+	// Coarse failure classification for dashboards: 'provider_error',
+	// 'timeout', 'client_disconnect', 'prompt_blocked'. Detail stays in logs.
+	errorKind: varchar('error_kind', { length: 32 }),
+	// Back-reference for the answer case. SET NULL, not cascade: deleting a
+	// conversation must not rewrite billing history.
+	messageId: uuid('message_id').references(() => messages.id, { onDelete: 'set null' }),
+	createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+}, (table) => [
+	// The ledger's shape is "per-tenant time series"; every read is a
+	// workspace-scoped range scan.
+	index('llm_usage_events_workspace_created_idx').on(table.workspaceId, table.createdAt),
 ]);

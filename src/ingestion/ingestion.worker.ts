@@ -34,7 +34,8 @@ export class IngestionWorker extends WorkerHost {
       const chunks = this.chunker.split(parsed.text);
       if (chunks.length === 0) throw new Error('Document contains no extractable text');
       const embeddedChunks: Array<{ chunkIndex: number; content: string; charStart: number; charEnd: number; embedding: number[] }> = [];
-      for (const [chunkIndex, chunk] of chunks.entries()) embeddedChunks.push({ chunkIndex, ...chunk, embedding: await this.embeddings.embed(chunk.content) });
+      for (const [chunkIndex, chunk] of chunks.entries())
+        embeddedChunks.push({ chunkIndex, ...chunk, embedding: await this.embeddings.embed(chunk.content, { workspaceId, operation: 'embedding_index' }) });
       await withWorkspace(this.db, workspaceId, async (tx) => {
         await tx.delete(documentChunks).where(and(eq(documentChunks.documentVersionId, documentVersionId), eq(documentChunks.workspaceId, workspaceId)));
         // searchVector is gone from the insert list: it is a STORED generated

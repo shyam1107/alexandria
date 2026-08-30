@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { ValidationPipe, VersioningType } from '@nestjs/common';
+import { NotFoundException, ValidationPipe, VersioningType } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import type { AddressInfo } from 'node:net';
@@ -174,12 +174,27 @@ describe('POST /chat (SSE over a real socket)', () => {
   it('reports a pre-stream failure as a real HTTP error, not a 200 with an error frame', async () => {
     // Nothing has been written yet, so the status line is still ours to set.
     service.behaviour = async () => {
-      throw Object.assign(new Error('Conversation not found'), { status: 404 });
+      throw new NotFoundException('Conversation not found');
     };
     const response = await post({ message: 'missing conversation' });
 
     expect(response.status).toBe(404);
     expect(response.headers.get('content-type')).toContain('application/json');
+  });
+
+  it('never leaks a raw internal error message to the client', async () => {
+    // Only Nest HttpExceptions keep their message and status. A plain Error
+    // — even one carrying a status property, which is how this regression
+    // presented — becomes a generic 502: the raw text could be a Postgres
+    // error string or a vendor response body.
+    service.behaviour = async () => {
+      throw Object.assign(new Error('relation "conversations" does not exist'), { status: 404 });
+    };
+    const response = await post({ message: 'internal explosion' });
+    const body = (await response.json()) as { message: string };
+
+    expect(response.status).toBe(502);
+    expect(body.message).toBe('Chat failed');
   });
 
   it('degrades a mid-stream failure to an error frame, since 200 is already sent', async () => {

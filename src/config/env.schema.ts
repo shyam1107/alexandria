@@ -44,8 +44,20 @@ export const envSchema = z.object({
   // auth, and the provider sends the Bearer header only when this is set —
   // same code path for localhost and ollama.com.
   OLLAMA_API_KEY: z.string().optional(),
-  LLM_DRIVER: z.enum(['ollama', 'scripted']).default('ollama'),
+  // Phase 6: the fallback chain, comma-separated, in order. 'scripted'
+  // short-circuits to a deterministic provider for CI and smoke runs. Every
+  // chain — even one provider — gets retries and stream deadlines from the
+  // resilient wrapper.
+  LLM_CHAIN: z.string().default('ollama'),
   GENERATION_MODEL: z.string().default('gpt-oss:120b'),
+  GEMINI_BASE_URL: z.string().default('https://generativelanguage.googleapis.com'),
+  // Free-tier friendly, non-reasoning — the same token-frugality call that
+  // picked gpt-oss:120b over the reasoning models.
+  GEMINI_MODEL: z.string().default('gemini-2.0-flash'),
+  // gemini-2.0-flash's real input limit. Rarely binds: the composite chain
+  // reports the MINIMUM window across providers, and chat budgeting is
+  // capped by CHAT_CONTEXT_TOKEN_BUDGET anyway.
+  GEMINI_NUM_CTX: z.coerce.number().int().positive().default(1_048_576),
   // Ollama defaults num_ctx to 2048 regardless of the model's advertised
   // window and then silently truncates the FRONT of the prompt — where the
   // system prompt lives. Always send it explicitly.
@@ -56,6 +68,22 @@ export const envSchema = z.object({
   // drift — the behaviour Phase 8 exists to measure, so it must be pinned and
   // configurable rather than inherited.
   GENERATION_TEMPERATURE: z.coerce.number().min(0).max(2).default(0.2),
+  // Phase 6 resilience knobs. Two retries per chain step: enough for a
+  // transient blip, not enough to turn a dead provider into a 30s stall
+  // before fallback.
+  LLM_MAX_RETRIES: z.coerce.number().int().nonnegative().default(2),
+  LLM_RETRY_BASE_MS: z.coerce.number().int().positive().default(500),
+  // A provider saying "wait 60s" via Retry-After is a fallback signal, not a
+  // retry invitation — clamp it.
+  LLM_RETRY_AFTER_CAP_MS: z.coerce.number().int().positive().default(10_000),
+  // Two deadlines, not one total timeout: a cold local model load is
+  // legitimately 10–20s to FIRST token, and a long answer is legitimately
+  // slow — but 30s of silence mid-stream is a stall, not thinking.
+  LLM_FIRST_TOKEN_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  LLM_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // Embeddings are single request/response, so one plain timeout suffices.
+  EMBEDDING_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  EMBEDDING_MAX_RETRIES: z.coerce.number().int().nonnegative().default(2),
   CHAT_HISTORY_MESSAGES: z.coerce.number().int().positive().default(10),
   // A message COUNT is not a size bound: ten turns of 4000-char questions and
   // 1024-token answers is ~10k tokens on its own. History is capped by tokens
@@ -65,6 +93,21 @@ export const envSchema = z.object({
   // of this and whatever the model's window has left after the system prompt,
   // history, the question, and the reserved output.
   CHAT_CONTEXT_TOKEN_BUDGET: z.coerce.number().int().positive().default(3000),
+}).superRefine((env, ctx) => {
+  // Cross-field fail-fast. A chain that names gemini with no key parses
+  // fine, boots fine, and looks configured — the GeminiProvider only throws
+  // when it is first asked to stream. That failure lands at the worst
+  // possible moment: a fallback is exercised precisely when the primary is
+  // already down, so a missing key turns one outage into two and is
+  // discovered mid-incident. Refuse to boot instead.
+  const chain = env.LLM_CHAIN.split(',').map((name) => name.trim()).filter(Boolean);
+  if (chain.includes('gemini') && !env.GEMINI_API_KEY) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['GEMINI_API_KEY'],
+      message: 'LLM_CHAIN names gemini, so GEMINI_API_KEY must be set',
+    });
+  }
 });
 
 export type Env = z.infer<typeof envSchema>;

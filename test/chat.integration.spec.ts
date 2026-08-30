@@ -12,7 +12,10 @@ import type { Message } from '../src/llm/llm.types';
 import { ChatService, type ChatSink } from '../src/chat/chat.service';
 import { ConversationRepository } from '../src/chat/conversation.repository';
 import { QueryRewriterService } from '../src/chat/query-rewriter.service';
-import { NO_CONTEXT_REFUSAL, PROMPT_VERSION } from '../src/chat/prompt';
+import { UsageLedger } from '../src/llm/usage-ledger';
+import { LlmTimeoutError, PromptBlockedError } from '../src/llm/llm.errors';
+import type { LlmEvent } from '../src/llm/llm.types';
+import { BLOCKED_REFUSAL, NO_CONTEXT_REFUSAL, PROMPT_VERSION } from '../src/chat/prompt';
 
 /**
  * The chat pipeline end to end, with no model running anywhere: generation
@@ -80,7 +83,11 @@ describe('chat (integration)', () => {
 
   function makeChat(script?: string[], onCall?: (system: string) => void) {
     const llm = makeProvider(script, onCall);
-    return new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm), llm, config);
+    // The ledger is REAL here (same DB, runtime role): the pipeline's cost
+    // accounting is part of what this suite proves, not an implementation
+    // detail to stub away.
+    const ledger = new UsageLedger(db);
+    return new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
   }
 
   async function allMessages(conversationId: string) {
@@ -152,10 +159,22 @@ describe('chat (integration)', () => {
     expect(rows[1].prompt_tokens).toBeGreaterThan(0);
     // The persisted citation is the RESOLVED map — chunk id + span as served.
     expect(rows[1].citations[0]).toMatchObject({ n: 1, documentTitle: 'Refund policy', charStart: 0, charEnd: 58 });
+
+    // The ledger row: one per provider call, linked to the answer, cost an
+    // exact integer in micro-USD (pg returns bigint as a string; '0' is the
+    // DECLARED free price of the scripted provider, not an unknown price).
+    const ledgerRows = (await owner.query(`select * from llm_usage_events where message_id = $1`, [rows[1].id])).rows;
+    expect(ledgerRows).toHaveLength(1);
+    expect(ledgerRows[0]).toMatchObject({ operation: 'chat_answer', provider: 'scripted', model: 'scripted', success: true, cost_micro_usd: '0' });
+    expect(ledgerRows[0].prompt_tokens).toBe(rows[1].prompt_tokens);
   });
 
   it('rewrites follow-up queries and exposes the rewrite under debug', async () => {
     const chat = makeChat();
+    // Tests share workspaceA, so count the ledger rows THIS test creates.
+    const countOps = async () =>
+      (await owner.query(`select operation, count(*)::int as n from llm_usage_events where workspace_id = $1 group by operation`, [workspaceA])).rows;
+    const before = await countOps();
     const first = new CollectingSink();
     await chat.streamChat(workspaceA, userId, { message: 'refund policy?' }, first, new AbortController().signal);
     const conversationId = first.last('done').data.conversationId as string;
@@ -167,6 +186,15 @@ describe('chat (integration)', () => {
 
     const rows = await allMessages(conversationId);
     expect(rows.map((r) => [r.seq, r.role])).toEqual([[1, 'user'], [2, 'assistant'], [3, 'user'], [4, 'assistant']]);
+
+    // The rewrite call is LLM spend with no message row of its own — the
+    // ledger is the only place it exists. Exactly one rewrite (the follow-up;
+    // first turns skip it) and two answers were created by THIS test.
+    const after = await countOps();
+    const delta = (op: string) =>
+      (after.find((r) => r.operation === op)?.n ?? 0) - (before.find((r) => r.operation === op)?.n ?? 0);
+    expect(delta('query_rewrite')).toBe(1);
+    expect(delta('chat_answer')).toBe(2);
   });
 
   it('flags out-of-range citations instead of stripping them', async () => {
@@ -262,7 +290,8 @@ describe('chat (integration)', () => {
       prompts.push(messages);
       return messages[0].content.startsWith('Rewrite the user') ? ['rewritten'] : ANSWER_CHUNKS;
     });
-    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm), llm, config);
+    const ledger = new UsageLedger(db);
+    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
 
     const abort = new AbortController();
     const first = new CollectingSink();
@@ -326,5 +355,63 @@ describe('chat (integration)', () => {
     const rows = await allMessages((sink.frames[0].data as { conversationId: string }).conversationId);
     expect(rows).toHaveLength(2);
     expect(rows[1]).toMatchObject({ role: 'assistant', content: ANSWER_CHUNKS[0], partial: true, finish_reason: 'error' });
+  });
+
+  it('attributes a mid-stream timeout to the provider that stalled, not to NULL', async () => {
+    // A deadline fired by the resilient wrapper knows which chain member it
+    // was talking to. Recording provider NULL would drop attribution for
+    // exactly the failure class most worth attributing — "which vendor is
+    // timing out on us?" is unanswerable from a table of NULLs.
+    class StallsProvider extends ScriptedProvider {
+      override async *stream(): AsyncIterable<LlmEvent> {
+        yield { type: 'delta', text: 'half an ans' };
+        throw new LlmTimeoutError('idle', 'ollama');
+      }
+    }
+    const llm = new StallsProvider([]);
+    const ledger = new UsageLedger(db);
+    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
+
+    const sink = new CollectingSink();
+    await chat.streamChat(workspaceA, userId, { message: 'refund policy?' }, sink, new AbortController().signal);
+
+    const rows = await allMessages((sink.frames[0].data as { conversationId: string }).conversationId);
+    expect(rows[1]).toMatchObject({ partial: true, finish_reason: 'error', provider: 'ollama' });
+    const ledgerRows = (await owner.query(`select * from llm_usage_events where message_id = $1`, [rows[1].id])).rows;
+    expect(ledgerRows).toHaveLength(1);
+    expect(ledgerRows[0]).toMatchObject({ operation: 'chat_answer', success: false, error_kind: 'timeout', provider: 'ollama' });
+    // The model stays NULL: our deadline knows the vendor, not which model
+    // was loaded behind it. Honest beats complete.
+    expect(ledgerRows[0].model).toBeNull();
+  });
+
+  it('answers a provider safety block with a deterministic refusal, not an error frame or an empty turn', async () => {
+    // Gemini can end a stream with promptFeedback.blockReason and ZERO
+    // candidates. Persisting that as an empty answer would poison history;
+    // serving an error frame would conflate "provider refused" with
+    // "provider broke". It is a third, deterministic refusal instead.
+    class BlockedProvider extends ScriptedProvider {
+      override stream(): AsyncIterable<LlmEvent> {
+        return { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(new PromptBlockedError('PROHIBITED_CONTENT', 'scripted', 'scripted')) }) };
+      }
+    }
+    const llm = new BlockedProvider([]);
+    const ledger = new UsageLedger(db);
+    const chat = new ChatService(new ConversationRepository(db), new RetrievalService(db, stubEmbeddings), new QueryRewriterService(llm, ledger), llm, ledger, config);
+
+    const sink = new CollectingSink();
+    await chat.streamChat(workspaceA, userId, { message: 'refund policy?' }, sink, new AbortController().signal);
+
+    expect(sink.events()).toEqual(['sources', 'delta', 'usage', 'done']);
+    expect(sink.text()).toBe(BLOCKED_REFUSAL);
+    expect(sink.text()).not.toBe(NO_CONTEXT_REFUSAL); // "provider refused" ≠ "corpus doesn't say"
+    expect(sink.last('done').data).toMatchObject({ finishReason: 'content_filter' });
+
+    const conversationId = sink.last('done').data.conversationId as string;
+    const rows = await allMessages(conversationId);
+    expect(rows[1]).toMatchObject({ content: BLOCKED_REFUSAL, finish_reason: 'content_filter', partial: false, provider: 'scripted' });
+    const ledgerRows = (await owner.query(`select * from llm_usage_events where message_id = $1`, [rows[1].id])).rows;
+    expect(ledgerRows).toHaveLength(1);
+    expect(ledgerRows[0]).toMatchObject({ operation: 'chat_answer', success: false, error_kind: 'prompt_blocked' });
   });
 });

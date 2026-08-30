@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.schema';
+import { LlmProviderError } from './llm.errors';
 import type { LlmEvent, LlmProvider, LlmStreamParams } from './llm.types';
 
 interface OllamaChatChunk {
@@ -58,11 +59,42 @@ export class OllamaProvider implements LlmProvider {
       signal: params.signal ?? null,
     });
     if (!response.ok || !response.body) {
-      throw new Error(`Generation provider returned HTTP ${response.status}`);
+      // Drain the body: under undici an unread error response leaks the
+      // connection — and the provider's own error text is the difference
+      // between "model not found" (404, fix the config) and a 500 (retry).
+      const detail = (await response.text().catch(() => '')).slice(0, 500);
+      const retryAfter = Number(response.headers.get('retry-after'));
+      throw new LlmProviderError(`Ollama returned HTTP ${response.status}: ${detail}`, {
+        provider: this.name,
+        model: this.model,
+        status: response.status,
+        retryable: response.status === 429 || response.status >= 500,
+        retryAfterMs: Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined,
+      });
     }
 
     const decoder = new TextDecoder();
     let buffer = '';
+    const configuredModel = this.model;
+    const providerName = this.name;
+
+    function* processLine(line: string): Generator<LlmEvent> {
+      const parsed = JSON.parse(line) as OllamaChatChunk;
+      if (parsed.message?.content) yield { type: 'delta', text: parsed.message.content };
+      if (parsed.done) {
+        yield {
+          type: 'done',
+          usage: {
+            promptTokens: parsed.prompt_eval_count ?? 0,
+            completionTokens: parsed.eval_count ?? 0,
+          },
+          finishReason: parsed.done_reason === 'length' ? 'length' : 'stop',
+          model: parsed.model ?? configuredModel,
+          provider: providerName,
+        };
+      }
+    }
+
     for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
       buffer += decoder.decode(chunk, { stream: true });
       let newline: number;
@@ -70,24 +102,30 @@ export class OllamaProvider implements LlmProvider {
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
-        const parsed = JSON.parse(line) as OllamaChatChunk;
-        if (parsed.message?.content) yield { type: 'delta', text: parsed.message.content };
-        if (parsed.done) {
-          yield {
-            type: 'done',
-            usage: {
-              promptTokens: parsed.prompt_eval_count ?? 0,
-              completionTokens: parsed.eval_count ?? 0,
-            },
-            finishReason: parsed.done_reason === 'length' ? 'length' : 'stop',
-            model: parsed.model ?? this.model,
-          };
-          return;
+        for (const event of processLine(line)) {
+          yield event;
+          if (event.type === 'done') return;
         }
+      }
+    }
+    // Flush the decoder and parse any residual buffer: a final NDJSON line
+    // with no trailing newline is still data — and it is usually the `done`
+    // line, i.e. the one carrying usage. Dropping it was a data-loss bug
+    // wearing a framing bug's clothes.
+    buffer += decoder.decode();
+    if (buffer.trim()) {
+      for (const event of processLine(buffer.trim())) {
+        yield event;
+        if (event.type === 'done') return;
       }
     }
     // A body that ends without a done line is a truncated stream; treating it
     // as a normal end would persist a partial answer as if it were complete.
-    throw new Error('Generation stream ended without a terminal frame');
+    // Retryable: truncation is a connection event, not a request bug.
+    throw new LlmProviderError('Generation stream ended without a terminal frame', {
+      provider: this.name,
+      model: this.model,
+      retryable: true,
+    });
   }
 }
