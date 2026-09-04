@@ -7,7 +7,7 @@ import { computeCostMicroUsd } from './pricing';
 import type { Redis } from 'ioredis';
 import { REDIS } from '../redis/redis.module';
 import { QUOTA_MONTHLY_MICRO_USD } from './quota.constants';
-import type { MetricsService } from '../metrics/metrics.service';
+import { MetricsService } from '../metrics/metrics.service';
 
 export interface UsageEntry {
   operation: 'chat_answer' | 'query_rewrite' | 'embedding_index' | 'embedding_query';
@@ -90,8 +90,21 @@ export class UsageLedger {
       });
       // Fast-path counter. Only SUCCESSFUL calls consume quota: failures
       // (provider_error, timeout) produced no value and a retried call
-      // would double-bill. Client disconnects DID consume the tokens, so
-      // they count — the provider charges us regardless of delivery.
+      // would double-bill. Client disconnects are INTENDED to count — the
+      // provider charges for a stream the client abandoned — but that
+      // intent is UNIMPLEMENTED: the disconnect path (chat.service.ts)
+      // passes no token counts, so this branch can only ever add zero
+      // (Ollama, declared 0n) or, for a metered model since the item [5]
+      // fix, compute NULL cost and skip the counter entirely. Partial usage
+      // cannot be plumbed for Ollama at all — prompt/eval counts arrive
+      // only on the final done chunk, which an aborted stream never
+      // delivers — and estimating tokens from answer length is refused by
+      // the project's own no-estimates rule. Gemini could expose partial
+      // usageMetadata mid-stream but only via an LlmEvent shape change;
+      // deferred and recorded in 16-known-limitations. Until then the
+      // disconnect row carries NULL tokens and NULL cost on metered
+      // models: loudly countable as unknown consumption, never a
+      // confident $0.
       if (costMicroUsd !== null && (entry.success || entry.errorKind === 'client_disconnect')) {
         await this.redis
           .multi()

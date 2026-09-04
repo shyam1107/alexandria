@@ -24,11 +24,23 @@ export class StorageService {
     });
   }
 
-  async createUploadUrl(objectKey: string, contentType: string): Promise<string> {
+  /**
+   * Presigned PUT for direct upload. ContentLength is a SIGNED header: the
+   * client's Content-Length must equal the byteSize it declared at
+   * createUpload, so a client declaring 1 byte and PUTting gigabytes gets
+   * a 403 from storage instead of landing the object. (S3 presigned PUT
+   * enforces signed ContentLength on both MinIO and AWS.)
+   *
+   * This is the whole fix for item [7]: previously only Bucket/Key/ContentType
+   * were signed, so the size check at completeUpload fired after the bytes
+   * had already landed — bounded late is not bounded.
+   */
+  async createUploadUrl(objectKey: string, contentType: string, contentLength: number): Promise<string> {
     return getSignedUrl(this.client, new PutObjectCommand({
       Bucket: this.bucket,
       Key: objectKey,
       ContentType: contentType,
+      ContentLength: contentLength,
     }), { expiresIn: this.uploadUrlTtl });
   }
 

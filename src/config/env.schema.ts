@@ -99,7 +99,7 @@ export const envSchema = z.object({
   // and because the right ROLE for this leg is tie-breaker that surfaces
   // what the vector leg missed, not co-equal ranker. Re-run the sweep if the
   // embedding model, k, or the corpus mix changes.
-  RRF_FTS_WEIGHT: z.coerce.number().positive().default(0.05),
+  RRF_FTS_WEIGHT: z.coerce.number().positive().default(0.07),
   HNSW_EF_SEARCH: z.coerce.number().int().min(1).max(1000).default(80),
   CHUNK_SIZE: z.coerce.number().int().positive().default(1200),
   CHUNK_OVERLAP: z.coerce.number().int().nonnegative().default(200),

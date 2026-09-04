@@ -112,7 +112,7 @@ describe('rate limiter (integration, real Redis)', () => {
     const ips = Array.from({ length: 15 }, (_, i) => `10.1.${i}.${(i % 250) + 1}`);
     const results: boolean[] = [];
     for (const sprayIp of ips) {
-      results.push(await limiter.checkLogin(sprayIp, email, 20, 300, 10, 300));
+      results.push(await limiter.checkLogin('login', sprayIp, email, 20, 300, 10, 300));
     }
     expect(results.filter(Boolean).length).toBe(10);
 
@@ -123,7 +123,7 @@ describe('rate limiter (integration, real Redis)', () => {
     const emails = Array.from({ length: 25 }, (_, i) => `victim${i}-${randomUUID()}@test.local`);
     const stuffResults: boolean[] = [];
     for (const victim of emails) {
-      stuffResults.push(await limiter.checkLogin(stuffIp, victim, 20, 300, 10, 300));
+      stuffResults.push(await limiter.checkLogin('login', stuffIp, victim, 20, 300, 10, 300));
     }
     expect(stuffResults.filter(Boolean).length).toBe(20);
   });

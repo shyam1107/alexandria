@@ -13,8 +13,10 @@ import type { SearchDto } from './dto/search.dto';
 /**
  * Candidates fetched per signal before fusion. Deep pools cost little (an
  * HNSW top-N and a GIN lookup are both cheap) and give RRF enough overlap to
- * matter: a chunk ranked 40th by one signal and 5th by the other still
- * surfaces. Tune with the Phase 8 eval harness, not by intuition.
+ * matter. The pool must be larger than the golden-set corpus for the eval
+ * harness to exercise keyword-only finds; 50 over a 60-chunk corpus leaves
+ * room for the keyword leg to surface what the vector leg misses. Tune the
+ * weight with the Phase 8 eval harness, not by intuition.
  */
 const CANDIDATES_PER_SIGNAL = 50;
 
@@ -220,7 +222,10 @@ export class RetrievalService {
           and c.document_version_id = any(${versionArray}::uuid[])
           and c.embedding is not null
           and c.embedding_model = ${this.embeddings.modelName}
-        order by distance
+        -- c.id desc tiebreaker: two chunks can share a distance (identical
+        -- vectors after normalisation); without a total order the winner is
+        -- nondeterministic and RRF ranks flip across plan changes.
+        order by distance, c.id desc
         limit ${CANDIDATES_PER_SIGNAL}
       )
       select
@@ -235,7 +240,7 @@ export class RetrievalService {
       from ranked r
       join document_versions lv on lv.id = r.document_version_id
       join documents d on d.id = lv.document_id
-      order by r.distance asc
+      order by r.distance asc, r.id desc
     `);
     const rows = result.rows as unknown as VectorCandidate[];
     if (rows.length === 0) await this.diagnoseEmptyVectorLeg(tx, workspaceId, versionArray);
@@ -312,14 +317,39 @@ export class RetrievalService {
       -- recall on every multi-word natural question and the hybrid ranking
       -- was byte-identical to vector-only. The leg was inert.
       --
-      -- Rewriting the top-level & to | keeps every other operator that
-      -- websearch_to_tsquery produces — phrases stay phrases ('e429' <->
-      -- 'rate' <-> 'limit'), negation stays negation — and ts_rank still
-      -- ranks a chunk matching four terms above one matching one, which is
-      -- the behaviour people expect from keyword search. The cast is safe:
-      -- the text was produced by websearch_to_tsquery, never by a user.
+      -- Phase 8 bought OR semantics by rewriting EVERY top-level & to |.
+      -- That silently inverted negation. websearch_to_tsquery('rate limit
+      -- -sandbox') is 'rate' & 'limit' & !'sandbox'; blanket-replacing gives
+      -- 'rate' | 'limit' | !'sandbox', where !'sandbox' is a top-level
+      -- disjunct matching every chunk that merely LACKS the word. The user's
+      -- exclusion became an inclusion of its complement: unrelated chunks
+      -- matched at rank 0, the excluded document still came back on its other
+      -- terms, and the leg's candidate slots filled with rank-0 rows that
+      -- displaced real lexical matches.
+      --
+      -- So partition the conjuncts rather than replacing blindly: positives
+      -- OR together (the recall win Phase 8 was after), negations stay AND
+      -- filters (the exclusion the user actually asked for). Everything else
+      -- survives untouched because it never sits at the top level — phrases
+      -- stay phrases ('e429' <-> 'rate' <-> 'limit'), and a negated phrase
+      -- stays one conjunct, !( 'free' <-> 'tier' ). ts_rank still ranks a
+      -- chunk matching four terms above one matching one.
+      --
+      -- Splitting on the literal ' & ' is safe: the default parser never
+      -- emits a lexeme containing spaces, so no term can be torn in half. The
+      -- cast is safe for the reason it always was — this text is
+      -- websearch_to_tsquery's own output, never a user's.
+      ws as (select websearch_to_tsquery('english', ${queryText})::text as txt),
+      conjuncts as (select t from ws, unnest(string_to_array(ws.txt, ' & ')) as t where ws.txt <> ''),
       q as (
-        select replace(websearch_to_tsquery('english', ${queryText})::text, ' & ', ' | ')::tsquery as tsq
+        select case
+          when p.a is null and n.a is null then ''
+          when p.a is null then array_to_string(n.a, ' & ')
+          when n.a is null then array_to_string(p.a, ' | ')
+          else '(' || array_to_string(p.a, ' | ') || ') & ' || array_to_string(n.a, ' & ')
+        end::tsquery as tsq
+        from (select array_agg(t) a from conjuncts where t not like '!%') p,
+             (select array_agg(t) a from conjuncts where t like '!%') n
       )
       select
         c.id,
@@ -337,7 +367,10 @@ export class RetrievalService {
       where c.workspace_id = ${workspaceId}::uuid
         and c.search_vector @@ q.tsq
         ${documentId ? sql`and lv.document_id = ${documentId}::uuid` : sql``}
-      order by "rank" desc
+      -- c.id desc tiebreaker: ts_rank produces ties (two chunks matching the
+      -- same terms at the same frequency); a total order keeps the candidate
+      -- set reproducible across plan changes, which RRF depends on.
+      order by "rank" desc, c.id desc
       limit ${CANDIDATES_PER_SIGNAL}
     `);
     return result.rows as unknown as FtsCandidate[];

@@ -2,8 +2,12 @@
  * Prompts are code. PROMPT_VERSION is persisted on every assistant message so
  * Phase 8's eval harness can attribute answer quality to the prompt that
  * produced it — a prompt change with no version bump is undebuggable.
+ *
+ * v2 (2026-09-04, item [9]): context markers appearing inside retrieved chunk
+ * text are neutralised before interpolation. The template is unchanged, but
+ * what the model sees for some chunks is not, so the version moves.
  */
-export const PROMPT_VERSION = 'chat-v1';
+export const PROMPT_VERSION = 'chat-v2';
 
 /**
  * The contract that makes "I don't know" possible: the model may use ONLY
@@ -22,8 +26,28 @@ Rules:
 - If the context does not contain enough information to answer, say that you don't know based on the available documents. Do not use outside knowledge and do not guess.
 - Be concise and direct.`;
 
+/**
+ * Anything that looks like a context marker, in chunk text. The system prompt
+ * tells the model that text between the markers is data — but a chunk
+ * containing the literal `</context>` ends the block MECHANICALLY, and no
+ * amount of instruction-following prevents that. Delimiter defence has to be
+ * structural or it is not defence.
+ */
+const CONTEXT_MARKER = /<(\/?)context>/gi;
+
+/**
+ * Guillemets, not deletion: the text stays readable and its meaning survives
+ * (a document that genuinely discusses these tags still reads correctly),
+ * while the characters that would close the block do not appear. Applied to
+ * the PROMPT only — `sources`, which the client renders and citations point
+ * into, keeps the original bytes.
+ */
+function neutraliseMarkers(text: string): string {
+  return text.replace(CONTEXT_MARKER, '\u2039$1context\u203a');
+}
+
 export function buildAnswerUserMessage(contextText: string, question: string): string {
-  return `<context>\n${contextText}\n</context>\n\nQuestion: ${question}`;
+  return `<context>\n${neutraliseMarkers(contextText)}\n</context>\n\nQuestion: ${question}`;
 }
 
 /**

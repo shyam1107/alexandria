@@ -55,10 +55,28 @@ export function precisionAtK(retrieved: string[], relevant: string[], k: number)
  * Answers "how far down did the user have to look", which is the question
  * that matters when a generator only reads the top few chunks. Averaged over
  * cases this is MRR.
+ *
+ * This is the unbounded form — it searches the entire retrieved list. The
+ * aggregate uses `reciprocalRankAtK` instead, because every other metric in
+ * the report table is computed at k and the table header says `@5`. MRR over
+ * the full list would silently credit a hit at position 50 in a top-5 report,
+ * making the number inconsistent with its neighbours.
  */
 export function reciprocalRank(retrieved: string[], relevant: string[]): number {
   const relevantSet = new Set(relevant);
   const index = retrieved.findIndex((id) => relevantSet.has(id));
+  return index === -1 ? 0 : 1 / (index + 1);
+}
+
+/**
+ * Reciprocal rank truncated at k: the first relevant result must appear
+ * within the top k, or the score is 0. This is the form the aggregate uses,
+ * because the eval report labels every column `@5` and an MRR that searches
+ * beyond the cut is answering a different question than the column promises.
+ */
+export function reciprocalRankAtK(retrieved: string[], relevant: string[], k: number): number {
+  const relevantSet = new Set(relevant);
+  const index = retrieved.slice(0, k).findIndex((id) => relevantSet.has(id));
   return index === -1 ? 0 : 1 / (index + 1);
 }
 
@@ -125,7 +143,7 @@ export function aggregate(results: Array<{ retrieved: string[]; relevant: string
     cases: scored.length,
     recallAtK: mean(scored.map((r) => recallAtK(r.retrieved, r.relevant, k))),
     precisionAtK: mean(scored.map((r) => precisionAtK(r.retrieved, r.relevant, k))),
-    mrr: mean(scored.map((r) => reciprocalRank(r.retrieved, r.relevant))),
+    mrr: mean(scored.map((r) => reciprocalRankAtK(r.retrieved, r.relevant, k))),
     ndcgAtK: mean(scored.map((r) => ndcgAtK(r.retrieved, r.relevant, k))),
     hitRate: mean(scored.map((r) => hitRateAtK(r.retrieved, r.relevant, k))),
   };

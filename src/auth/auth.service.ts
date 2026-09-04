@@ -111,8 +111,25 @@ export class AuthService {
     const [encodedHeader, encodedPayload, signature] = token.split('.');
     if (!encodedHeader || !encodedPayload || !signature) throw new UnauthorizedException('Invalid access token');
     const expected = base64Url(createHmac('sha256', this.secret).update(`${encodedHeader}.${encodedPayload}`).digest());
-    if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw new UnauthorizedException('Invalid access token');
-    const payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString()) as { sub?: string; email?: string; exp?: number };
+    // Compare BYTE lengths, not string lengths. timingSafeEqual throws
+    // RangeError on unequal buffers, and a 43-character signature holding one
+    // multi-byte character decodes to 44 bytes — so the old string-length
+    // guard let an unauthenticated request reach a throw that Nest reports as
+    // 500. Decode once, compare the buffers, keep the constant-time property.
+    const signatureBytes = Buffer.from(signature, 'utf8');
+    const expectedBytes = Buffer.from(expected, 'utf8');
+    if (signatureBytes.length !== expectedBytes.length || !timingSafeEqual(signatureBytes, expectedBytes)) {
+      throw new UnauthorizedException('Invalid access token');
+    }
+    // The signature verifies, but that only proves WE minted the bytes — it
+    // does not make them JSON. A body that decodes to garbage threw
+    // SyntaxError here, another unauthenticated 500.
+    let payload: { sub?: string; email?: string; exp?: number };
+    try {
+      payload = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString()) as { sub?: string; email?: string; exp?: number };
+    } catch {
+      throw new UnauthorizedException('Invalid access token');
+    }
     if (!payload.sub || !payload.email || !payload.exp || payload.exp < Math.floor(Date.now() / 1000)) throw new UnauthorizedException('Access token expired');
     return { userId: payload.sub, email: payload.email };
   }

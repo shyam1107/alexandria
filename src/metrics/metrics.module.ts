@@ -1,13 +1,13 @@
-import { Global, Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
-import { MetricsService } from './metrics.service';
+import { Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
+import { MetricsCoreModule } from './metrics-core.module';
 import { MetricsController } from './metrics.controller';
 import { TraceContextService } from './trace-context.service';
 import { TraceMiddleware } from './trace.middleware';
 
 /**
- * Global: the metrics service is a cross-cutting sink — the ledger, the
- * chat controller, and the HTTP interceptor all record into it without
- * importing wiring.
+ * The HTTP half of metrics: the scrape endpoint and the request-scoped
+ * trace middleware. API process only — the worker imports MetricsCoreModule
+ * instead, which carries the sinks without the controller.
  *
  * /metrics is deliberately NOT behind auth: Prometheus scrapes with a
  * bearer token in production, but that is deployment config (Phase 9), not
@@ -15,11 +15,10 @@ import { TraceMiddleware } from './trace.middleware';
  * no document content, no prompts, no tenant ids (see the cardinality
  * rule on MetricsService). Network-level restriction is the deploy's job.
  */
-@Global()
 @Module({
-  providers: [MetricsService, TraceContextService, TraceMiddleware],
+  imports: [MetricsCoreModule],
   controllers: [MetricsController],
-  exports: [MetricsService, TraceContextService],
+  providers: [TraceMiddleware],
 })
 export class MetricsModule implements NestModule {
   constructor(private readonly traces: TraceContextService) {}

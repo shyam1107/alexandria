@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregate, hitRateAtK, ndcgAtK, precisionAtK, recallAtK, reciprocalRank } from './metrics';
+import { aggregate, hitRateAtK, ndcgAtK, precisionAtK, recallAtK, reciprocalRank, reciprocalRankAtK } from './metrics';
 
 /**
  * Worked examples with the arithmetic spelled out. A metrics module that is
@@ -51,6 +51,27 @@ describe('reciprocalRank', () => {
     // Both rank the first relevant hit at position 2; the tail is irrelevant.
     expect(reciprocalRank(['x', 'a', 'b'], ['a', 'b'])).toBe(0.5);
     expect(reciprocalRank(['x', 'b', 'z'], ['a', 'b'])).toBe(0.5);
+  });
+});
+
+describe('reciprocalRankAtK', () => {
+  it('matches reciprocalRank when the hit is inside the cut', () => {
+    expect(reciprocalRankAtK(['a', 'b'], ['a'], 5)).toBe(1);
+    expect(reciprocalRankAtK(['x', 'a'], ['a'], 5)).toBe(0.5);
+  });
+
+  it('returns 0 when the first relevant hit is beyond k — the whole point of @k', () => {
+    // Position 6 (0-based 5) with k=5: inside the full list but outside the cut.
+    // The unbounded form would score 1/6; the k-bounded form must score 0,
+    // because the report column says @5 and a hit at position 6 is not in the
+    // top 5. This is the regression test for item [11]: before the fix,
+    // aggregate's MRR used the unbounded form and silently credited this.
+    expect(reciprocalRankAtK(['x', 'y', 'z', 'w', 'v', 'a'], ['a'], 5)).toBe(0);
+    expect(reciprocalRankAtK(['x', 'y', 'z', 'w', 'v', 'a'], ['a'], 6)).toBeCloseTo(1 / 6);
+  });
+
+  it('is 0 when nothing relevant was retrieved at all', () => {
+    expect(reciprocalRankAtK(['x', 'y'], ['a'], 5)).toBe(0);
   });
 });
 
@@ -113,5 +134,22 @@ describe('aggregate', () => {
     );
     expect(scores.cases, 'only the ranking cases are counted').toBe(1);
     expect(scores.recallAtK).toBe(1);
+  });
+
+  it('computes MRR at k, not over the full list — a hit beyond the cut scores 0', () => {
+    // The first relevant hit is at position 6 (0-based 5). With k=5 the
+    // k-bounded MRR must be 0, not 1/6. Before item [11] was fixed, aggregate
+    // used the unbounded reciprocalRank and this would have scored 1/6.
+    const scores = aggregate(
+      [{ retrieved: ['x', 'y', 'z', 'w', 'v', 'a'], relevant: ['a'] }],
+      5,
+    );
+    expect(scores.mrr).toBe(0);
+    // Same case with k=6 includes the hit, so MRR is 1/6.
+    const scores6 = aggregate(
+      [{ retrieved: ['x', 'y', 'z', 'w', 'v', 'a'], relevant: ['a'] }],
+      6,
+    );
+    expect(scores6.mrr).toBeCloseTo(1 / 6);
   });
 });

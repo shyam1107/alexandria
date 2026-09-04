@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.schema';
 import { UsageLedger } from '../llm/usage-ledger';
-import type { EmbeddingCache } from './embedding-cache.service';
+import { EmbeddingCache } from './embedding-cache.service';
 
 export interface EmbedContext {
   workspaceId: string;

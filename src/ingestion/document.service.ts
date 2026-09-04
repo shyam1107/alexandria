@@ -13,7 +13,7 @@ import { documents, documentVersions } from '../database/schema';
 import type { Env } from '../config/env.schema';
 import { INGESTION_QUEUE, INGEST_DOCUMENT_JOB, type IngestDocumentJob } from './ingestion.constants';
 import { StorageService } from './storage.service';
-import type { TraceContextService } from '../metrics/trace-context.service';
+import { TraceContextService } from '../metrics/trace-context.service';
 
 export interface CreateDocumentInput {
   workspaceId: string;
@@ -50,7 +50,7 @@ export class DocumentService {
       document,
       versionId,
       objectKey,
-      uploadUrl: await this.storage.createUploadUrl(objectKey, input.contentType),
+      uploadUrl: await this.storage.createUploadUrl(objectKey, input.contentType, input.byteSize),
     };
   }
 
@@ -70,7 +70,7 @@ export class DocumentService {
         .where(and(eq(documentVersions.workspaceId, workspaceId), eq(documentVersions.contentHash, contentHash))),
     );
     if (duplicate && duplicate.id !== versionId) {
-      await this.discardVersion(workspaceId, documentId, versionId);
+      await this.discardVersion(workspaceId, documentId, versionId, version.objectKey);
       throw new ConflictException({
         message: 'Identical content is already indexed in this workspace',
         existingDocumentId: duplicate.documentId,
@@ -85,7 +85,7 @@ export class DocumentService {
       });
     } catch (error) {
       if (!isUniqueViolation(error)) throw error;
-      await this.discardVersion(workspaceId, documentId, versionId);
+      await this.discardVersion(workspaceId, documentId, versionId, version.objectKey);
       throw new ConflictException({ message: 'Identical content is already indexed in this workspace' });
     }
 
@@ -109,10 +109,15 @@ export class DocumentService {
   /**
    * Removes a version that turned out to be redundant, and its parent document
    * if nothing else hangs off it — so a rejected upload leaves no half-created
-   * rows behind. The S3 object is left to a bucket lifecycle rule, which has to
-   * exist anyway for uploads that are presigned but never completed.
+   * rows behind. The S3 object is deleted HERE, not by a lifecycle rule: the
+   * Phase 7b sweeper only finds rows with status = 'pending', and this path
+   * has already deleted the row, so nothing else would ever reclaim the
+   * object. (The bucket lifecycle rule Phase 7b rejected would delete LIVE
+   * documents too — object keys carry no pending/completed prefix.) S3
+   * delete is idempotent, so a race with the sweeper is harmless.
    */
-  private async discardVersion(workspaceId: string, documentId: string, versionId: string) {
+  private async discardVersion(workspaceId: string, documentId: string, versionId: string, objectKey: string) {
+    await this.storage.delete(objectKey);
     await withWorkspace(this.db, workspaceId, async (tx) => {
       await tx.delete(documentVersions).where(and(eq(documentVersions.id, versionId), eq(documentVersions.workspaceId, workspaceId)));
       const remaining = await tx.select({ id: documentVersions.id }).from(documentVersions).where(eq(documentVersions.documentId, documentId));

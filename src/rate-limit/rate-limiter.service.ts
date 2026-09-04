@@ -92,16 +92,22 @@ export class RateLimiterService {
   }
 
   /**
+   * SCOPE separates endpoints that share a keying strategy but not a threat
+   * profile. /auth/register and /auth/login both key on email, and while
+   * they shared one window anyone who knew a victim's address could burn it
+   * with ten unauthenticated registrations and lock that victim out of
+   * login (item [17]).
+   *
    * Login limiters are keyed on BOTH the source IP and the submitted email,
    * separately. Pre-auth there is no workspace and no user id — IP is the
    * attacker-controlled pivot for credential stuffing from one host, and
    * email is the pivot for password spraying across hosts. Either check
    * failing denies the request, and both windows reset independently.
    */
-  async checkLogin(ip: string, email: string, ipLimit: number, ipWindowSeconds: number, emailLimit: number, emailWindowSeconds: number): Promise<boolean> {
+  async checkLogin(scope: 'login' | 'register', ip: string, email: string, ipLimit: number, ipWindowSeconds: number, emailLimit: number, emailWindowSeconds: number): Promise<boolean> {
     const [byIp, byEmail] = await Promise.all([
-      this.consume(`rl:login:ip:${ip}`, ipLimit, ipWindowSeconds),
-      this.consume(`rl:login:email:${email}`, emailLimit, emailWindowSeconds),
+      this.consume(`rl:${scope}:ip:${ip}`, ipLimit, ipWindowSeconds),
+      this.consume(`rl:${scope}:email:${email}`, emailLimit, emailWindowSeconds),
     ]);
     return byIp && byEmail;
   }

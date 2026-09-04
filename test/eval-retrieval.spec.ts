@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { Client, Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { writeFileSync } from 'node:fs';
+import { harnessConfig } from './support/harness-config';
 import * as schema from '../src/database/schema';
 import type { Db } from '../src/database/database.module';
 import { RetrievalService } from '../src/retrieval/retrieval.service';
@@ -30,19 +31,19 @@ import { aggregate, type AggregateScores } from '../src/eval/metrics';
  * Method note: per-leg rankings are reconstructed from the debug signals of
  * one hybrid search rather than by running the legs separately. That is exact
  * only while topK is large enough to contain every candidate either leg
- * produced, which is why the corpus is ~20 chunks and topK is set above it.
- * On a large corpus this reconstruction would be lossy and the harness would
- * need the legs exposed directly.
+ * produced. The corpus is 60 chunks and TOP_K is set to 60 so no candidate
+ * is lost before scoring. CANDIDATES_PER_SIGNAL is 50, so either leg may
+ * return up to 50 candidates — all of which fit inside TOP_K.
  */
 
 const RUN = process.env.EVAL === '1';
-const TOP_K = 20; // >= corpus size, so no candidate is lost before scoring
+const TOP_K = 60; // >= corpus size, so no candidate is lost before scoring
 const REPORT_AT_K = 5; // what the generator actually reads
 
 interface Scored { hybrid: AggregateScores; vector: AggregateScores; fts: AggregateScores }
 
 function table(title: string, rows: Array<[string, AggregateScores]>): string[] {
-  const lines = [``, title, `${'strategy'.padEnd(14)}${'recall@5'.padStart(10)}${'MRR'.padStart(9)}${'nDCG@5'.padStart(9)}${'hit@5'.padStart(8)}${'cases'.padStart(7)}`];
+  const lines = [``, title, `${'strategy'.padEnd(14)}${'recall@5'.padStart(10)}${'MRR@5'.padStart(9)}${'nDCG@5'.padStart(9)}${'hit@5'.padStart(8)}${'cases'.padStart(7)}`];
   for (const [name, s] of rows) {
     lines.push(
       name.padEnd(14) +
@@ -64,22 +65,12 @@ describe.runIf(RUN)('RAG retrieval evaluation (EVAL=1)', () => {
   const chunkIdByKey = new Map<string, string>();
   const report: string[] = [];
 
-  const config = {
-    get: (key: string) => {
-      const values: Record<string, unknown> = {
-        EMBEDDING_BASE_URL: process.env.EMBEDDING_BASE_URL ?? 'http://localhost:11434',
-        EMBEDDING_MODEL: process.env.EMBEDDING_MODEL ?? 'snowflake-arctic-embed:110m',
-        EMBEDDING_DIMENSIONS: 768,
-        EMBEDDING_TIMEOUT_MS: 60_000,
-        EMBEDDING_MAX_RETRIES: 1,
-        HNSW_EF_SEARCH: Number(process.env.HNSW_EF_SEARCH ?? 80),
-        RRF_VECTOR_WEIGHT: Number(process.env.RRF_VECTOR_WEIGHT ?? 1),
-        RRF_FTS_WEIGHT: Number(process.env.RRF_FTS_WEIGHT ?? 0.05),
-      };
-      if (!(key in values)) throw new Error(`eval: unexpected config key ${key}`);
-      return values[key];
-    },
-  } as never;
+  // Every retrieval knob comes from the validated env, never a literal: this
+  // harness previously carried `RRF_FTS_WEIGHT ?? 0.05` and kept scoring the
+  // OLD weight after the schema default moved to 0.07, so `pnpm eval` could
+  // not reproduce the table in doc 14. See test/support/harness-config.ts.
+  // Only the two genuinely harness-specific values are stated here.
+  const config = harnessConfig({ EMBEDDING_TIMEOUT_MS: 60_000, EMBEDDING_MAX_RETRIES: 1 }) as never;
 
   beforeAll(async () => {
     owner = new Client({ connectionString: process.env.MIGRATION_DATABASE_URL });

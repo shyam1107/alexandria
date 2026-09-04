@@ -63,7 +63,7 @@ describe('weighted fusion', () => {
     const fts = [{ id: 'noise' }, { id: 'right' }];
 
     const equal = rrfMerge([vector, fts]);
-    const weighted = rrfMerge([vector, fts], RRF_K, [1, 0.05]);
+    const weighted = rrfMerge([vector, fts], RRF_K, [1, 0.07]);
 
     expect(weighted[0].item.id, 'the vector leg decides the top slot').toBe('right');
     // 'noise' is still present — it is a candidate, just not a winner.
@@ -79,13 +79,35 @@ describe('weighted fusion', () => {
     expect(merged[0].score).toBeCloseTo(merged[1].score);
   });
 
-  it('keeps a unique find from a down-weighted list — that is what buys recall', () => {
-    // At weight 0.02 the golden set lost recall because this stopped
-    // happening: the keyword leg is the only leg that finds some chunks.
-    const vector = [{ id: 'a' }];
-    const fts = [{ id: 'only-fts-finds-this' }];
-    const merged = rrfMerge([vector, fts], RRF_K, [1, 0.05]);
-    expect(merged.map((h) => h.item.id)).toContain('only-fts-finds-this');
+  it('a dual-signal find outranks a vector-only find — that is what buys recall at 0.07', () => {
+    // The old version of this test used a ONE-element vector list, which let
+    // an FTS-only find appear in the merged output by default — rrfMerge
+    // returns the full union, so containment always passes. With a realistic
+    // 50-element vector list (CANDIDATES_PER_SIGNAL), an FTS-only find at
+    // weight 0.07 scores 0.07/61 = 0.001148 while the worst vector candidate
+    // scores 1/110 = 0.009091 — the FTS-only find is buried below all 50
+    // vector candidates and cannot surface in the top-k.
+    //
+    // What the weight actually buys is not surfacing keyword-only finds but
+    // promoting DUAL-SIGNAL chunks: a chunk found by both legs gets
+    // 1/(60+rank_vec) + 0.07/(60+rank_fts), which beats a vector-only chunk
+    // at the same vector rank. That is the measured recall mechanism at 0.07:
+    // the `both` class goes from 0.938 (vector-only) to 1.000 (hybrid).
+    const pads = (count: number, prefix: string) => Array.from({ length: count }, (_, i) => ({ id: `${prefix}${i}` }));
+    const vector = [...pads(49, 'vec-'), { id: 'dual-signal' }];
+    const fts = [{ id: 'dual-signal' }, ...pads(49, 'fts-')];
+
+    const merged = rrfMerge([vector, fts], RRF_K, [1, 0.07]);
+
+    // The dual-signal chunk must rank above every vector-only chunk. It
+    // appears at vector rank 50 and FTS rank 1; a vector-only chunk at vector
+    // rank 49 scores 1/(60+49) = 0.009174. The dual-signal chunk scores
+    // 1/(60+50) + 0.07/(60+1) = 0.009091 + 0.001148 = 0.010239 — it wins.
+    const dualIndex = merged.findIndex((h) => h.item.id === 'dual-signal');
+    const vecOnlyIndex = merged.findIndex((h) => h.item.id === 'vec-48'); // vector rank 49
+
+    expect(dualIndex, 'dual-signal chunk must be in the merged output').toBeGreaterThanOrEqual(0);
+    expect(dualIndex, 'dual-signal chunk must outrank the vector-only chunk at a similar vector rank').toBeLessThan(vecOnlyIndex);
   });
 });
 

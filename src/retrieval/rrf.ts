@@ -32,10 +32,12 @@ export interface RrfHit<T> {
  * recall stayed perfect — the right chunk was still retrieved, just no longer
  * first, which is exactly what the generator reads.
  *
- * Weights are the smallest possible correction: still rank-based, still
- * nothing to calibrate per query, one number per signal saying how much that
- * signal's ordering is worth. They are NOT a substitute for a re-ranker;
- * they only rescale a signal's whole contribution.
+ * The weight is NOT a substitute for a re-ranker; it only rescales a signal's
+ * whole contribution. At 0.07 (swept on a 60-chunk golden set, post-fix) the
+ * keyword leg cannot surface a keyword-only find above 50 vector candidates
+ * (0.07/61 vs 1/110), but it DOES promote dual-signal chunks — the mechanism
+ * that lifts `both`-class recall from 0.938 to 1.000 while keeping aggregate
+ * MRR above vector-only.
  */
 export function rrfMerge<T extends { id: string }>(lists: T[][], k: number = RRF_K, weights?: number[]): RrfHit<T>[] {
   const hits = new Map<string, RrfHit<T>>();

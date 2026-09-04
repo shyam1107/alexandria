@@ -4,6 +4,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { Redis } from 'ioredis';
 import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
+import { harnessConfig } from './support/harness-config';
 import * as schema from '../src/database/schema';
 import { RetrievalService } from '../src/retrieval/retrieval.service';
 import { EmbeddingService } from '../src/ingestion/embedding.service';
@@ -103,23 +104,22 @@ describe.runIf(RUN)('latency measurement (MEASURE=1)', () => {
   let wsA: string;
   let wsB: string;
 
-  const config = {
-    get: (key: string) => {
-      const values: Record<string, unknown> = {
-        EMBEDDING_BASE_URL: process.env.EMBEDDING_BASE_URL ?? 'http://localhost:11434',
-        EMBEDDING_MODEL: process.env.EMBEDDING_MODEL ?? 'nomic-embed-text',
-        EMBEDDING_DIMENSIONS: DIMENSIONS,
-        EMBEDDING_TIMEOUT_MS: 30_000,
-        EMBEDDING_MAX_RETRIES: 1,
-        EMBEDDING_CACHE_TTL_SECONDS: 3_600,
-        HNSW_EF_SEARCH: Number(process.env.HNSW_EF_SEARCH ?? 80),
-        RRF_VECTOR_WEIGHT: Number(process.env.RRF_VECTOR_WEIGHT ?? 1),
-        RRF_FTS_WEIGHT: Number(process.env.RRF_FTS_WEIGHT ?? 0.05),
-      };
-      if (!(key in values)) throw new Error(`measure: unexpected config key ${key}`);
-      return values[key];
-    },
-  } as never;
+  // Every knob comes from the validated env, never a literal. Two stale
+  // literals have already shipped here: 'nomic-embed-text' (which made the
+  // vector leg return [] on every iteration) and `RRF_FTS_WEIGHT ?? 0.05`
+  // (which measured the old weight after the default moved to 0.07). See
+  // test/support/harness-config.ts. Only harness-specific values are stated.
+  const config = harnessConfig({
+    EMBEDDING_DIMENSIONS: DIMENSIONS,
+    EMBEDDING_TIMEOUT_MS: 30_000,
+    EMBEDDING_MAX_RETRIES: 1,
+    EMBEDDING_CACHE_TTL_SECONDS: 3_600,
+  }) as never;
+
+  // The seeder reads the model from the same config the service uses, so the
+  // two can never drift. If someone reverts this to a hardcoded literal that
+  // does not match EMBEDDING_MODEL, the vector-leg assertion below fails.
+  const seedModel = (config as unknown as { get: (k: string) => string }).get('EMBEDDING_MODEL');
 
   // Measuring retrieval, not metering: a real ledger would add its own INSERT
   // to every sample and the number would stop being about retrieval.
@@ -154,16 +154,16 @@ describe.runIf(RUN)('latency measurement (MEASURE=1)', () => {
         const [{ id: versionId }] = (
           await owner.query(
             `insert into document_versions (document_id, workspace_id, object_key, original_filename, content_type, byte_size, content_hash, status, embedding_model)
-             values ($1, $2, $3, $4, 'text/plain', 1024, $5, 'indexed', 'nomic-embed-text') returning id`,
-            [docId, ws, `k/${randomUUID()}`, `doc-${d}.txt`, randomUUID().replace(/-/g, '')],
+             values ($1, $2, $3, $4, 'text/plain', 1024, $5, 'indexed', $6) returning id`,
+            [docId, ws, `k/${randomUUID()}`, `doc-${d}.txt`, randomUUID().replace(/-/g, ''), seedModel],
           )
         ).rows;
         const values: string[] = [];
         const params: unknown[] = [];
         for (let c = 0; c < CHUNKS_PER_DOC; c++) {
           const i = params.length;
-          values.push(`($${i + 1}, $${i + 2}, $${i + 3}, $${i + 4}, $${i + 5}::vector, 'nomic-embed-text')`);
-          params.push(versionId, ws, c, randomText(d * CHUNKS_PER_DOC + c), randomVector());
+          values.push(`($${i + 1}, $${i + 2}, $${i + 3}, $${i + 4}, $${i + 5}::vector, $${i + 6}::text)`);
+          params.push(versionId, ws, c, randomText(d * CHUNKS_PER_DOC + c), randomVector(), seedModel);
         }
         await owner.query(
           `insert into document_chunks (document_version_id, workspace_id, chunk_index, content, embedding, embedding_model) values ${values.join(',')}`,
@@ -191,7 +191,20 @@ describe.runIf(RUN)('latency measurement (MEASURE=1)', () => {
     const coldStart = performance.now();
     await uncached.embed(QUERIES[0], { workspaceId: wsA, operation: 'embedding_query' });
     const coldMs = performance.now() - coldStart;
-    await retrieval.search(wsA, { query: QUERIES[0], topK: 8 });
+
+    // Warm-up search WITH debug so we can assert the vector leg actually
+    // returned candidates. The original spec seeded 'nomic-embed-text' while
+    // RetrievalService filtered on 'snowflake-arctic-embed:110m' — every vector
+    // leg returned [] and the only assertion (p95 < deadline) passed trivially
+    // on the empty path. This assertion makes that regression loud: if the
+    // seed model and the filter model ever drift again, the spec fails here
+    // before any timing numbers are printed.
+    const warmup = await retrieval.search(wsA, { query: QUERIES[0], topK: 8, debug: true });
+    expect(
+      warmup.debug?.candidates.vector,
+      `vector leg must return candidates when seed model matches EMBEDDING_MODEL — ` +
+        `got 0, which means the seeder and RetrievalService disagree on the model`,
+    ).toBeGreaterThan(0);
 
     const embedSamples: number[] = [];
     const retrievalSamples: number[] = [];
