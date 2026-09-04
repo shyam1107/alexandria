@@ -1,0 +1,17 @@
+Getting Started
+
+A workspace is the unit of everything: documents, conversations, billing, and access all belong to one workspace. Most customers run a single workspace; some keep a separate one per client or per department when the documents must not be searchable together.
+
+To add documents, open Documents and upload. Plain text, Markdown, and PDF are supported. A single file may be up to 25 MB. There is no limit on the number of documents beyond your plan's storage allowance.
+
+After upload, a document is split into passages of roughly 1,200 characters with a 200-character overlap between neighbours. The overlap matters: a sentence that straddles a boundary would otherwise be split across two passages and match neither well. Each passage is then converted into a numerical representation that captures its meaning, which is what makes it findable by a question phrased differently from the text.
+
+Indexing usually takes a few seconds for a short document and up to a minute for a large PDF. A document is not answerable until indexing finishes; its status shows as processing until then.
+
+Asking a question searches your documents two ways at once. One search matches on meaning, so "how long do I have to pay" finds a passage that says "invoices are payable within 30 days" despite sharing almost no words. The other matches on exact wording, which is what finds an error code or a product name that a meaning-based search would blur into something similar. The two result lists are then combined.
+
+Every answer cites the passages it used. A citation is not decoration: the answer is generated only from those passages, and if they do not contain enough to answer, the system says so rather than guessing. An answer with no citations is a refusal, and that is working correctly.
+
+Uploading a new version of a document replaces the old one for search purposes. Previous versions are retained but are never returned in answers, so an outdated policy cannot resurface once it has been superseded.
+
+Conversations remember what was said earlier, so follow-up questions can use pronouns. "What about annual plans?" after a question about payment terms is understood as being about payment terms.

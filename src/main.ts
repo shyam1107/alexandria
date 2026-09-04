@@ -19,7 +19,9 @@ async function bootstrap(): Promise<void> {
   // on SIGTERM (what ECS/K8s send before killing the container).
   app.enableShutdownHooks();
 
-  app.setGlobalPrefix('api', { exclude: ['health/live', 'health/ready'] });
+  // 'ui' is excluded so the demo client lives at /ui rather than /api/v1/ui —
+  // a URL you can say out loud while screen-sharing.
+  app.setGlobalPrefix('api', { exclude: ['health/live', 'health/ready', 'ui', 'ui/config'] });
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
 
   app.useGlobalPipes(

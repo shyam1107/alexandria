@@ -28,7 +28,8 @@
     "infra:llm": "docker compose --profile llm up -d",
     "db:setup": "pnpm db:bootstrap && pnpm db:migrate",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "demo:seed": "node scripts/seed-demo.mts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1106.0",

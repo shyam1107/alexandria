@@ -21,3 +21,4 @@ measure-p95*.txt
 
 # Local eval harness output (pnpm eval)
 eval-report*.txt
+demo/demo-config.json

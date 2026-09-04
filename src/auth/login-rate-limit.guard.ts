@@ -26,6 +26,15 @@ import { RateLimiterService } from '../rate-limit/rate-limiter.service';
  */
 abstract class EmailWindowGuard implements CanActivate {
   protected abstract readonly scope: 'login' | 'register';
+
+  /**
+   * Each subclass MUST declare its own constructor and call super.
+   * TypeScript emits `design:paramtypes` only for a class that has one, so a
+   * subclass relying on the inherited constructor gets no metadata, and Nest
+   * instantiates it with zero arguments — `limiter` is then undefined and the
+   * first request 500s. The DI graph still COMPILES (there is nothing to
+   * resolve), so the bootstrap smoke test cannot see it either.
+   */
   constructor(private readonly limiter: RateLimiterService) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -43,6 +52,9 @@ abstract class EmailWindowGuard implements CanActivate {
 @Injectable()
 export class LoginRateLimitGuard extends EmailWindowGuard {
   protected readonly scope = 'login' as const;
+  constructor(limiter: RateLimiterService) {
+    super(limiter);
+  }
 }
 
 /**
@@ -54,4 +66,7 @@ export class LoginRateLimitGuard extends EmailWindowGuard {
 @Injectable()
 export class RegisterRateLimitGuard extends EmailWindowGuard {
   protected readonly scope = 'register' as const;
+  constructor(limiter: RateLimiterService) {
+    super(limiter);
+  }
 }

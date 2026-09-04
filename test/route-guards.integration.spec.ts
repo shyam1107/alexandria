@@ -38,6 +38,14 @@ const PUBLIC_ROUTES: Record<string, string> = {
   // an x-workspace-id header that logout has no business needing.
   'POST /auth/logout': 'user-scoped, not tenant-scoped; carries AccessTokenGuard',
   'GET /metrics': 'internal scrape endpoint; item [15] tracks gating it',
+  // The local demo client, and the seeded credentials it reads. Both return
+  // 404 unless NODE_ENV is development — registered unconditionally so this
+  // test can see them, because a route that exists only under one NODE_ENV is
+  // a route no test covers. /ui/config serves a plaintext demo password, so
+  // the environment check is the whole security boundary: if it is ever
+  // removed, this comment is the reason it must not be.
+  'GET /ui': 'local demo client; 404 outside development',
+  'GET /ui/config': 'seeded demo credentials; 404 outside development',
   // KNOWN OPEN — item [15]. Counters and histograms only: no document
   // content, no prompts, no tenant ids (see the cardinality rule on
   // MetricsService). Protection is deferred to deployment (network policy or
