@@ -52,3 +52,40 @@ describe('rrfMerge', () => {
     expect(rrfMerge([[], []])).toEqual([]);
   });
 });
+
+describe('weighted fusion', () => {
+  it('lets a down-weighted list contribute without outvoting a confident one', () => {
+    // The measured problem: once the keyword leg used OR semantics it
+    // returned something for every question, and at equal weight its noise
+    // outranked a confident vector match. Weighting keeps its unique finds
+    // while stopping it from reordering the top.
+    const vector = [{ id: 'right' }, { id: 'ok' }];
+    const fts = [{ id: 'noise' }, { id: 'right' }];
+
+    const equal = rrfMerge([vector, fts]);
+    const weighted = rrfMerge([vector, fts], RRF_K, [1, 0.05]);
+
+    expect(weighted[0].item.id, 'the vector leg decides the top slot').toBe('right');
+    // 'noise' is still present — it is a candidate, just not a winner.
+    expect(weighted.map((h) => h.item.id)).toContain('noise');
+    // And down-weighting genuinely changed the ordering, or the test proves nothing.
+    expect(equal.map((h) => h.item.id)).not.toEqual(weighted.map((h) => h.item.id));
+  });
+
+  it('defaults to equal weights when none are given', () => {
+    const a = [{ id: 'x' }];
+    const b = [{ id: 'y' }];
+    const merged = rrfMerge([a, b]);
+    expect(merged[0].score).toBeCloseTo(merged[1].score);
+  });
+
+  it('keeps a unique find from a down-weighted list — that is what buys recall', () => {
+    // At weight 0.02 the golden set lost recall because this stopped
+    // happening: the keyword leg is the only leg that finds some chunks.
+    const vector = [{ id: 'a' }];
+    const fts = [{ id: 'only-fts-finds-this' }];
+    const merged = rrfMerge([vector, fts], RRF_K, [1, 0.05]);
+    expect(merged.map((h) => h.item.id)).toContain('only-fts-finds-this');
+  });
+});
+

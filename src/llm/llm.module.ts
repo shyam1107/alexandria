@@ -77,6 +77,8 @@ import { isPriced } from './pricing';
           retryAfterCapMs: config.get('LLM_RETRY_AFTER_CAP_MS', { infer: true }),
           firstTokenTimeoutMs: config.get('LLM_FIRST_TOKEN_TIMEOUT_MS', { infer: true }),
           idleTimeoutMs: config.get('LLM_IDLE_TIMEOUT_MS', { infer: true }),
+          breakerThreshold: config.get('LLM_BREAKER_THRESHOLD', { infer: true }),
+          breakerCooldownMs: config.get('LLM_BREAKER_COOLDOWN_MS', { infer: true }),
         });
       },
       inject: [ConfigService, OllamaProvider, GeminiProvider],

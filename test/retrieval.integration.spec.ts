@@ -46,6 +46,8 @@ const configStub = () =>
   ({
     get: (key: string) => {
       if (key === 'HNSW_EF_SEARCH') return 80;
+      if (key === 'RRF_VECTOR_WEIGHT') return 1;
+      if (key === 'RRF_FTS_WEIGHT') return 0.05;
       throw new Error(`config stub asked for unexpected key ${key}`);
     },
   }) as never;
@@ -344,6 +346,62 @@ describe('retrieval (integration)', () => {
       const contents = new Set(response.results.map((r) => r.content));
       expect(contents.size, 'both legs must return exactly one tied version').toBeLessThanOrEqual(1);
       expect(response.results[0]?.content).toBe(maxChunk.content);
+    } finally {
+      await owner.query(`delete from workspaces where id = $1::uuid`, [ws]);
+    }
+  });
+  it('never returns a vector from a different embedding model, even when it is the nearest neighbour', async () => {
+    // The corpus is half-migrated: one chunk embedded by the CURRENT model,
+    // one by an older one. The stale chunk is deliberately given the query's
+    // exact vector (distance 0) and the current-model chunk a worse one, so
+    // if the model predicate were missing the stale chunk would win outright.
+    //
+    // Why that matters more than it looks: a cosine distance between two
+    // different models' vectors is a meaningless number, not a wrong-ish one.
+    // Retrieval would return a confident, well-formed, arbitrary result and
+    // the answer above it would cite it. `embedding_model` had been recorded
+    // per chunk since Phase 3 and read by nobody.
+    const ws = (await owner.query(`insert into workspaces (name) values ('retrieval-mixed-space') returning id`)).rows[0].id;
+    try {
+      const doc = (await owner.query(`insert into documents (workspace_id, title, status) values ($1, 'mixed doc', 'indexed') returning id`, [ws])).rows[0].id;
+      const version = (
+        await owner.query(
+          `insert into document_versions (document_id, workspace_id, object_key, original_filename, content_type, byte_size, status)
+           values ($1, $2, 'k/mixed', 'mixed.txt', 'text/plain', 100, 'indexed') returning id`,
+          [doc, ws],
+        )
+      ).rows[0].id;
+      // Stale: perfect distance-0 match for the query vector, wrong model.
+      await owner.query(
+        `insert into document_chunks (document_version_id, workspace_id, chunk_index, content, char_start, char_end, embedding, embedding_model)
+         values ($1, $2, 0, 'stale space refund policy', 0, 25, $3::vector, 'retired-embedding-model')`,
+        [version, ws, basis(0)],
+      );
+      // Current: a worse vector, but the only one in a comparable space.
+      await owner.query(
+        `insert into document_chunks (document_version_id, workspace_id, chunk_index, content, char_start, char_end, embedding, embedding_model)
+         values ($1, $2, 1, 'current space refund policy', 0, 27, $3::vector, 'test-embedding-model')`,
+        [version, ws, tilted()],
+      );
+
+      const response = await retrieval.search(ws, { query: 'refund policy', topK: 10, debug: true });
+
+      // The decisive assertion: the vector leg produced exactly ONE candidate.
+      // Both chunks are indexed, in-workspace and non-null; only the model
+      // predicate separates them. Without it this is 2 and the stale chunk
+      // wins at distance 0.
+      expect(response.debug!.candidates.vector, 'the foreign-model chunk must never be a vector candidate').toBe(1);
+
+      // And it is not merely absent from the vector leg — no returned result
+      // carries a vector signal for it. It may still appear via FTS, which is
+      // lexical and model-independent: that is the designed degradation, not
+      // a leak.
+      const stale = response.results.find((r) => r.content === 'stale space refund policy');
+      expect(stale?.signals?.vector, 'a foreign-model vector must never be ranked by the vector leg').toBeUndefined();
+
+      const current = response.results.find((r) => r.content === 'current space refund policy');
+      expect(current, 'the comparable-space chunk is still retrievable').toBeDefined();
+      expect(current!.signals?.vector, 'and it IS ranked by the vector leg').toBeDefined();
     } finally {
       await owner.query(`delete from workspaces where id = $1::uuid`, [ws]);
     }

@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../config/env.schema';
 import { sql } from 'drizzle-orm';
@@ -6,7 +6,8 @@ import type { Db } from '../database/database.module';
 import { DRIZZLE } from '../database/database.module';
 import { withWorkspace, type Tx } from '../database/tenant';
 import { EmbeddingService } from '../ingestion/embedding.service';
-import { rrfMerge } from './rrf';
+import { MetricsService } from '../metrics/metrics.service';
+import { RRF_K, rrfMerge } from './rrf';
 import type { SearchDto } from './dto/search.dto';
 
 /**
@@ -57,13 +58,21 @@ export interface SearchHit {
 @Injectable()
 export class RetrievalService {
   private readonly efSearch: number;
+  private readonly vectorWeight: number;
+  private readonly ftsWeight: number;
+  private readonly logger = new Logger(RetrievalService.name);
 
   constructor(
     @Inject(DRIZZLE) private readonly db: Db,
     private readonly embeddings: EmbeddingService,
     config: ConfigService<Env, true>,
+    // Optional so the integration suites can build the service with a db and
+    // an embedding double; production wiring always has MetricsModule (global).
+    @Optional() private readonly metrics?: MetricsService,
   ) {
     this.efSearch = config.get('HNSW_EF_SEARCH', { infer: true });
+    this.vectorWeight = config.get('RRF_VECTOR_WEIGHT', { infer: true });
+    this.ftsWeight = config.get('RRF_FTS_WEIGHT', { infer: true });
   }
 
   async search(workspaceId: string, dto: SearchDto) {
@@ -84,7 +93,7 @@ export class RetrievalService {
       return { vectorRows, ftsRows };
     });
 
-    const merged = rrfMerge<VectorCandidate | FtsCandidate>([vectorRows, ftsRows]);
+    const merged = rrfMerge<VectorCandidate | FtsCandidate>([vectorRows, ftsRows], RRF_K, [this.vectorWeight, this.ftsWeight]);
     const vectorById = new Map(vectorRows.map((row) => [row.id, row]));
     const ftsById = new Map(ftsRows.map((row) => [row.id, row]));
 
@@ -162,6 +171,24 @@ export class RetrievalService {
    *
    * The explicit workspace predicate is the application-level filter; the RLS
    * policy is the backstop beneath it. Both, always.
+   *
+   * THE EMBEDDING-MODEL PREDICATE IS A CORRECTNESS GUARD, NOT AN OPTIMISATION.
+   * A cosine distance between vectors from two different models is a number
+   * with no meaning: the spaces are unrelated, so the "nearest" chunk is
+   * arbitrary. Nothing about that failure looks like a failure — retrieval
+   * returns confident, well-formed, wrong results, and the answer above it
+   * cites them. `embedding_model` has been recorded per chunk since Phase 3
+   * and, until now, read by nobody; changing EMBEDDING_MODEL without
+   * re-indexing silently poisoned every search. Chunk level, not version
+   * level: the vector belongs to the chunk, and versions predating Phase 4
+   * carry a NULL model.
+   *
+   * The consequence is deliberate: chunks embedded by an older model become
+   * invisible to the VECTOR leg until re-indexed. They remain findable by
+   * the FTS leg, which is lexical and model-independent — so a half-migrated
+   * corpus degrades to keyword-only for the stale documents rather than
+   * returning nonsense for all of them. `diagnoseEmptyVectorLeg` makes that
+   * state loud instead of leaving it to be discovered as "search got worse".
    */
   private async vectorLeg(tx: Tx, workspaceId: string, queryVector: string, documentId?: string): Promise<VectorCandidate[]> {
     // Phase 1: latest indexed version per document. `id desc` is the
@@ -192,6 +219,7 @@ export class RetrievalService {
         where c.workspace_id = ${workspaceId}::uuid
           and c.document_version_id = any(${versionArray}::uuid[])
           and c.embedding is not null
+          and c.embedding_model = ${this.embeddings.modelName}
         order by distance
         limit ${CANDIDATES_PER_SIGNAL}
       )
@@ -209,7 +237,48 @@ export class RetrievalService {
       join documents d on d.id = lv.document_id
       order by r.distance asc
     `);
-    return result.rows as unknown as VectorCandidate[];
+    const rows = result.rows as unknown as VectorCandidate[];
+    if (rows.length === 0) await this.diagnoseEmptyVectorLeg(tx, workspaceId, versionArray);
+    return rows;
+  }
+
+  /**
+   * Why did the vector leg return nothing when the workspace has indexed
+   * documents? Almost always because EMBEDDING_MODEL changed and the corpus
+   * was never re-indexed, which the model predicate now (correctly) filters
+   * out. Silence here is the expensive kind: hybrid search still returns FTS
+   * hits, so the product keeps answering and only the semantic half is gone.
+   *
+   * The diagnostic costs one COUNT and runs ONLY on the empty-result path —
+   * the happy path pays nothing, and the pathological path is exactly when
+   * somebody needs the explanation. It never throws: a broken diagnostic must
+   * not break a search.
+   */
+  private async diagnoseEmptyVectorLeg(tx: Tx, workspaceId: string, versionArray: ReturnType<typeof sql.param>): Promise<void> {
+    try {
+      const stale = await tx.execute(sql`
+        select c.embedding_model as model, count(*)::int as count
+        from document_chunks c
+        where c.workspace_id = ${workspaceId}::uuid
+          and c.document_version_id = any(${versionArray}::uuid[])
+          and c.embedding is not null
+          and (c.embedding_model is distinct from ${this.embeddings.modelName})
+        group by 1
+      `);
+      const rows = stale.rows as unknown as Array<{ model: string | null; count: number }>;
+      if (rows.length === 0) return;
+      const total = rows.reduce((sum, row) => sum + row.count, 0);
+      this.metrics?.recordStaleEmbeddingChunks(total);
+      this.logger.warn(
+        `vector leg empty: ${total} indexed chunk(s) in this workspace were embedded by ` +
+          `${rows.map((r) => `${r.model ?? 'unknown'} (${r.count})`).join(', ')} but EMBEDDING_MODEL is ` +
+          `${this.embeddings.modelName}. Those vectors live in a different space and are excluded on purpose. ` +
+          `Re-index the corpus; until then these documents are reachable by keyword search only.`,
+      );
+    } catch {
+      // A diagnostic that breaks the request it is explaining is worse than
+      // no diagnostic.
+    }
   }
 
   /**
@@ -235,7 +304,23 @@ export class RetrievalService {
         where workspace_id = ${workspaceId}::uuid and status = 'indexed'
         order by document_id, created_at desc, id desc
       ),
-      q as (select websearch_to_tsquery('english', ${queryText}) as tsq)
+      -- OR semantics, not AND. websearch_to_tsquery yields
+      -- 'invoic' & 'sent' & 'long' & 'pay' for "When are invoices sent and
+      -- how long do I have to pay?" — every term REQUIRED — so a chunk
+      -- containing "invoices" and "payable" but not "sent" does not match at
+      -- all. Measured by the Phase 8 harness: the keyword leg scored 0.000
+      -- recall on every multi-word natural question and the hybrid ranking
+      -- was byte-identical to vector-only. The leg was inert.
+      --
+      -- Rewriting the top-level & to | keeps every other operator that
+      -- websearch_to_tsquery produces — phrases stay phrases ('e429' <->
+      -- 'rate' <-> 'limit'), negation stays negation — and ts_rank still
+      -- ranks a chunk matching four terms above one matching one, which is
+      -- the behaviour people expect from keyword search. The cast is safe:
+      -- the text was produced by websearch_to_tsquery, never by a user.
+      q as (
+        select replace(websearch_to_tsquery('english', ${queryText})::text, ' & ', ' | ')::tsquery as tsq
+      )
       select
         c.id,
         c.chunk_index as "chunkIndex",

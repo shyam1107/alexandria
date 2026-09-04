@@ -113,6 +113,8 @@ describe.runIf(RUN)('latency measurement (MEASURE=1)', () => {
         EMBEDDING_MAX_RETRIES: 1,
         EMBEDDING_CACHE_TTL_SECONDS: 3_600,
         HNSW_EF_SEARCH: Number(process.env.HNSW_EF_SEARCH ?? 80),
+        RRF_VECTOR_WEIGHT: Number(process.env.RRF_VECTOR_WEIGHT ?? 1),
+        RRF_FTS_WEIGHT: Number(process.env.RRF_FTS_WEIGHT ?? 0.05),
       };
       if (!(key in values)) throw new Error(`measure: unexpected config key ${key}`);
       return values[key];

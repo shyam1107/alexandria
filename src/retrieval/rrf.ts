@@ -22,9 +22,25 @@ export interface RrfHit<T> {
   ranks: (number | null)[];
 }
 
-export function rrfMerge<T extends { id: string }>(lists: T[][], k: number = RRF_K): RrfHit<T>[] {
+/**
+ * Per-list weights, defaulting to equal. Phase 4 shipped unweighted and Phase 8
+ * measured why that is not free: once the keyword leg was fixed to use OR
+ * semantics it began returning *something* for every natural-language
+ * question, including questions it has no business answering. Unweighted
+ * fusion gives that noise the same vote as a confident vector match, and
+ * measured on the golden set it cost 0.47 MRR on semantic questions while
+ * recall stayed perfect — the right chunk was still retrieved, just no longer
+ * first, which is exactly what the generator reads.
+ *
+ * Weights are the smallest possible correction: still rank-based, still
+ * nothing to calibrate per query, one number per signal saying how much that
+ * signal's ordering is worth. They are NOT a substitute for a re-ranker;
+ * they only rescale a signal's whole contribution.
+ */
+export function rrfMerge<T extends { id: string }>(lists: T[][], k: number = RRF_K, weights?: number[]): RrfHit<T>[] {
   const hits = new Map<string, RrfHit<T>>();
   lists.forEach((list, leg) => {
+    const weight = weights?.[leg] ?? 1;
     list.forEach((item, index) => {
       const rank = index + 1;
       let hit = hits.get(item.id);
@@ -32,7 +48,7 @@ export function rrfMerge<T extends { id: string }>(lists: T[][], k: number = RRF
         hit = { item, score: 0, ranks: lists.map(() => null) };
         hits.set(item.id, hit);
       }
-      hit.score += 1 / (k + rank);
+      hit.score += weight / (k + rank);
       hit.ranks[leg] = rank;
     });
   });

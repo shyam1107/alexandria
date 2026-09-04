@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import type { Env } from '../config/env.schema';
 
@@ -41,5 +41,14 @@ export class StorageService {
     const result = await this.client.send(new GetObjectCommand({ Bucket: this.bucket, Key: objectKey }));
     if (!result.Body) throw new Error('Object storage returned an empty body');
     return Buffer.from(await result.Body.transformToByteArray());
+  }
+
+  /**
+   * Deletes one object. Used by the abandoned-upload sweeper; idempotent by
+   * S3 semantics (deleting a missing key succeeds), which matters because the
+   * sweeper may race a client that finally completed its upload.
+   */
+  async delete(objectKey: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: objectKey }));
   }
 }

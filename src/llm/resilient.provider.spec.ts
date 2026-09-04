@@ -25,6 +25,11 @@ function options(overrides: Partial<ConstructorParameters<typeof ResilientProvid
       retryAfterCapMs: 10_000,
       firstTokenTimeoutMs: 1_000,
       idleTimeoutMs: 1_000,
+      // High enough that the pre-existing retry/fallback tests never trip the
+      // breaker: those tests are about retry semantics, and a breaker firing
+      // inside them would make them pass for the wrong reason.
+      breakerThreshold: 99,
+      breakerCooldownMs: 60_000,
       sleep: async (ms: number) => {
         delays.push(ms);
       },
@@ -194,5 +199,80 @@ describe('ResilientProvider', () => {
     const { options: opts } = options({ providers: [big, small] });
     const chain = new ResilientProvider(opts);
     expect(chain.contextWindow).toBe(4_096);
+  });
+  describe('circuit breaker', () => {
+    it('skips a tripped provider instantly instead of paying its retry budget again', async () => {
+      // The whole point: without a breaker, a chain against a dead primary
+      // pays maxRetries x backoff on EVERY request before falling through.
+      const dead = new FlakyProvider(99);
+      const fallback = new ScriptedProvider(['fallback answer']);
+      const { options: opts, delays } = options({ providers: [dead, fallback], maxRetries: 2, breakerThreshold: 3 });
+      const chain = new ResilientProvider(opts);
+
+      await collect(chain);
+      const callsAfterFirst = dead.calls;
+      expect(callsAfterFirst).toBe(3); // 1 try + 2 retries, breaker trips on the 3rd
+      const delaysAfterFirst = delays.length;
+
+      // Second request: the breaker is open, so the dead provider is not
+      // touched at all and no backoff is paid.
+      const events = await collect(chain);
+      expect(dead.calls, 'a tripped provider must not be called again').toBe(callsAfterFirst);
+      expect(delays.length, 'and no backoff should be paid for it').toBe(delaysAfterFirst);
+      expect(events.at(-1)).toMatchObject({ type: 'done', provider: 'scripted' });
+    });
+
+    it('allows exactly one probe after the cooldown, and closes on success', async () => {
+      let clock = 1_000_000;
+      const flaky = new FlakyProvider(3); // fails 3x (trips), then succeeds
+      const { options: opts } = options({
+        providers: [flaky],
+        maxRetries: 2,
+        breakerThreshold: 3,
+        breakerCooldownMs: 30_000,
+        now: () => clock,
+      });
+      const chain = new ResilientProvider(opts);
+
+      await expect(collect(chain)).rejects.toThrow(); // trips the breaker
+      expect(flaky.calls).toBe(3);
+
+      // Still cooling: skipped entirely.
+      clock += 10_000;
+      await expect(collect(chain)).rejects.toThrow(/breaker open/);
+      expect(flaky.calls, 'still cooling — no probe').toBe(3);
+
+      // Cooled: one probe, which succeeds and closes the breaker.
+      clock += 25_000;
+      const events = await collect(chain);
+      expect(flaky.calls, 'exactly one probe after cooldown').toBe(4);
+      expect(events.filter((e) => e.type === 'delta').map((e) => (e as { text: string }).text).join('')).toBe('recovered');
+
+      // Closed again: a later request goes straight through.
+      clock += 1_000;
+      await collect(chain);
+      expect(flaky.calls).toBe(5);
+    });
+
+    it('does not trip on a caller abort — a user closing a tab is not an outage', async () => {
+      const caller = new AbortController();
+      class AbortsProvider extends ScriptedProvider {
+        calls = 0;
+        override stream(): AsyncIterable<LlmEvent> {
+          this.calls++;
+          caller.abort();
+          return { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(new Error('aborted')) }) };
+        }
+      }
+      const aborts = new AbortsProvider([]);
+      const { options: opts } = options({ providers: [aborts], maxRetries: 0, breakerThreshold: 1 });
+      const chain = new ResilientProvider(opts);
+
+      await expect(collect(chain, { ...PARAMS, signal: caller.signal })).rejects.toThrow();
+      // Breaker must still be closed: the next call reaches the provider.
+      const caller2 = new AbortController();
+      await expect(collect(chain, { ...PARAMS, signal: caller2.signal })).rejects.toThrow();
+      expect(aborts.calls, 'aborts must not count toward the breaker').toBe(2);
+    });
   });
 });

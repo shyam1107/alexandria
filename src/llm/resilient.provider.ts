@@ -12,6 +12,12 @@ export interface ResilientProviderOptions {
   retryAfterCapMs: number;
   firstTokenTimeoutMs: number;
   idleTimeoutMs: number;
+  /** Consecutive pre-first-token failures that trip a provider's breaker. */
+  breakerThreshold: number;
+  /** How long a tripped provider is skipped before one probe is allowed. */
+  breakerCooldownMs: number;
+  /** Clock seam so breaker tests need no real waiting. */
+  now?: () => number;
   /**
    * Clock seam for tests — the suite injects a no-op and asserts on recorded
    * delays instead of fake-timer gymnastics against the real event loop.
@@ -60,6 +66,25 @@ export class ResilientProvider implements LlmProvider {
   private readonly firstTokenTimeoutMs: number;
   private readonly idleTimeoutMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly breakerThreshold: number;
+  private readonly breakerCooldownMs: number;
+  private readonly now: () => number;
+  /**
+   * Breaker state, per provider, PER PROCESS. Deliberately not shared in
+   * Redis: this breaker exists to protect *this* process's latency budget,
+   * and consulting a network service on every LLM call would add a hop to
+   * the hottest path and couple generation to Redis availability — the same
+   * coupling the fail-open rate limiters already showed is a real cost. With
+   * few instances each converges within a couple of requests; the cost of
+   * being per-process is that N instances each pay their own probe.
+   *
+   * Keyed by provider IDENTITY, not by name: a chain may legitimately hold
+   * two members of the same type (two Ollama hosts, say), and keying by name
+   * would make a tripped primary also skip its healthy twin — which is
+   * exactly the failure the breaker exists to avoid. Caught by a test where
+   * both members happened to be named 'scripted'.
+   */
+  private readonly breaker = new Map<LlmProvider, { failures: number; openedAt: number | null }>();
   private readonly logger = new Logger(ResilientProvider.name);
 
   constructor(options: ResilientProviderOptions) {
@@ -71,6 +96,9 @@ export class ResilientProvider implements LlmProvider {
     this.firstTokenTimeoutMs = options.firstTokenTimeoutMs;
     this.idleTimeoutMs = options.idleTimeoutMs;
     this.sleep = options.sleep ?? defaultSleep;
+    this.breakerThreshold = options.breakerThreshold;
+    this.breakerCooldownMs = options.breakerCooldownMs;
+    this.now = options.now ?? Date.now;
     this.name = `chain(${this.providers.map((p) => p.name).join('>')})`;
     this.contextWindow = Math.min(...this.providers.map((p) => p.contextWindow));
   }
@@ -80,9 +108,52 @@ export class ResilientProvider implements LlmProvider {
   }
 
 
+  /**
+   * The breaker's "attempt this provider?" predicate — the seam Phase 6
+   * designed in and deferred. Closed: attempt. Open and still cooling:
+   * skip instantly, which is the entire point (a chain against a dead
+   * primary otherwise pays maxRetries x backoff on EVERY request before
+   * falling through). Open but cooled: allow exactly one probe — half-open.
+   */
+  private canAttempt(provider: LlmProvider): boolean {
+    const state = this.breaker.get(provider);
+    if (!state?.openedAt) return true;
+    return this.now() - state.openedAt >= this.breakerCooldownMs;
+  }
+
+  /** A completed first delta means the provider works: close the breaker. */
+  private recordSuccess(provider: LlmProvider): void {
+    const state = this.breaker.get(provider);
+    if (state && (state.failures > 0 || state.openedAt !== null)) {
+      if (state.openedAt !== null) this.logger.log(`${provider.name} recovered; breaker closed`);
+      this.breaker.set(provider, { failures: 0, openedAt: null });
+    }
+  }
+
+  /**
+   * Only PRE-FIRST-TOKEN failures count. A mid-stream failure is not evidence
+   * the provider is unhealthy for the next request — and counting aborts
+   * would trip the breaker on users closing tabs.
+   */
+  private recordFailure(provider: LlmProvider): void {
+    const state = this.breaker.get(provider) ?? { failures: 0, openedAt: null };
+    const failures = state.failures + 1;
+    // A failed half-open probe re-opens the window rather than accumulating.
+    const opened = state.openedAt !== null || failures >= this.breakerThreshold;
+    if (opened && state.openedAt === null) {
+      this.logger.warn(`${provider.name} failed ${failures}x consecutively; breaker OPEN for ${this.breakerCooldownMs}ms`);
+    }
+    this.breaker.set(provider, { failures, openedAt: opened ? this.now() : null });
+  }
+
   async *stream(params: LlmStreamParams): AsyncIterable<LlmEvent> {
     let lastError: unknown;
     for (const provider of this.providers) {
+      if (!this.canAttempt(provider)) {
+        this.logger.warn(`${provider.name} skipped: breaker open`);
+        lastError ??= new LlmProviderError(`${provider.name} breaker open`, { provider: provider.name, retryable: true });
+        continue;
+      }
       for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
         const iterator = this.attemptStream(provider, params)[Symbol.asyncIterator]();
         const buffer: LlmEvent[] = [];
@@ -109,7 +180,14 @@ export class ResilientProvider implements LlmProvider {
           // and a prompt block (falling back to a provider with different
           // safety tuning is a policy decision, not resilience).
           if (params.signal?.aborted || error instanceof PromptBlockedError) throw error;
+          this.recordFailure(provider);
           if (!this.isRetryable(error) || attempt === this.maxRetries) {
+            lastError = error;
+            break;
+          }
+          // A breaker that tripped mid-retry means further attempts on this
+          // provider are pointless; move to the next chain member now.
+          if (!this.canAttempt(provider)) {
             lastError = error;
             break;
           }
@@ -120,6 +198,7 @@ export class ResilientProvider implements LlmProvider {
         }
         // Committed: the first delta is leaving this wrapper. From here on,
         // errors propagate untouched — mid-stream retry would corrupt output.
+        this.recordSuccess(provider);
         for (const event of buffer) yield event;
         try {
           while (true) {
