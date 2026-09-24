@@ -101,7 +101,7 @@ export const documentVersions = pgTable('document_versions', {
 }, (table) => [
 	index('document_versions_document_idx').on(table.documentId),
 	index('document_versions_workspace_idx').on(table.workspaceId),
-	uniqueIndex('document_versions_hash_idx').on(table.workspaceId, table.contentHash),
+	uniqueIndex('document_versions_hash_idx').on(table.workspaceId, table.contentHash).where(sql`status <> 'failed'`),
 ]);
 
 export const documentChunks = pgTable('document_chunks', {

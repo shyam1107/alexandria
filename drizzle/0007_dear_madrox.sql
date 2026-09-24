@@ -1,0 +1,2 @@
+DROP INDEX "document_versions_hash_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "document_versions_hash_idx" ON "document_versions" USING btree ("workspace_id","content_hash") WHERE status <> 'failed';

@@ -141,7 +141,13 @@ export class AuthService {
     const signature = base64Url(createHmac('sha256', this.secret).update(`${header}.${payload}`).digest());
     const refreshToken = randomBytes(REFRESH_TOKEN_BYTES).toString('base64url');
     await this.db.insert(refreshTokens).values({ userId, familyId, tokenHash: hashToken(refreshToken), expiresAt: new Date(Date.now() + this.refreshTtl * 1000) });
-    return { accessToken: `${header}.${payload}.${signature}`, refreshToken, expiresIn: this.accessTtl };
+    // Closes the workspace-discovery gap the demo UI worked around with a
+    // seeded config file: every tenant route needs x-workspace-id, yet no
+    // endpoint told the client its id. First membership wins — single-
+    // workspace product stage; a workspace switcher needs a list endpoint
+    // and a picker, not this field growing into one.
+    const [membership] = await this.db.select({ workspaceId: memberships.workspaceId }).from(memberships).where(eq(memberships.userId, userId)).limit(1);
+    return { accessToken: `${header}.${payload}.${signature}`, refreshToken, expiresIn: this.accessTtl, workspaceId: membership?.workspaceId ?? null };
   }
 }
 

@@ -23,7 +23,7 @@
     "measure:p95": "MEASURE=1 vitest run test/measure-p95.spec.ts",
     "eval": "EVAL=1 vitest run test/eval-retrieval.spec.ts",
     "db:studio": "drizzle-kit studio",
-    "infra:up": "docker compose up -d --wait",
+    "infra:up": "docker compose up -d && docker compose ps",
     "infra:down": "docker compose down",
     "infra:llm": "docker compose --profile llm up -d",
     "db:setup": "pnpm db:bootstrap && pnpm db:migrate",

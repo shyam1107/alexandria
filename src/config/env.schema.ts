@@ -101,7 +101,11 @@ export const envSchema = z.object({
   // embedding model, k, or the corpus mix changes.
   RRF_FTS_WEIGHT: z.coerce.number().positive().default(0.07),
   HNSW_EF_SEARCH: z.coerce.number().int().min(1).max(1000).default(80),
-  CHUNK_SIZE: z.coerce.number().int().positive().default(1200),
+  // 512-token context of snowflake-arctic-embed:110m. Dense content (URLs,
+  // prices, code) tokenizes at ~2.3 chars/token, so 1200 chars overflowed the
+  // context and the provider 500'd mid-ingestion. 900 chars keeps the worst
+  // observed density under the limit; re-tune if EMBEDDING_MODEL changes.
+  CHUNK_SIZE: z.coerce.number().int().positive().default(900),
   CHUNK_OVERLAP: z.coerce.number().int().nonnegative().default(200),
   JWT_ACCESS_SECRET: z.string().min(32),
   JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(900),

@@ -106,7 +106,12 @@ export class EmbeddingService {
       // connection, and the provider's text is the only useful diagnostic.
       const detail = (await response.text().catch(() => '')).slice(0, 500);
       const error = new Error(`Embedding provider returned HTTP ${response.status}: ${detail}`);
-      (error as { retryable?: boolean }).retryable = response.status === 429 || response.status >= 500;
+      // 500 is normally retryable, but Ollama returns it for a
+      // deterministic input problem too: a chunk longer than the model's
+      // context. Retrying that re-parses and re-embeds the whole document
+      // five times to land in the same place. Detect the string and stop.
+      const contextOverflow = /exceeds the context length|context window/i.test(detail);
+      (error as { retryable?: boolean }).retryable = !contextOverflow && (response.status === 429 || response.status >= 500);
       throw error;
     }
     const payload = (await response.json()) as { embedding?: number[] };

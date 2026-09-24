@@ -33,6 +33,11 @@ export class DocumentController {
     return this.documents.completeUpload(request.workspaceId!, documentId, body.versionId);
   }
 
+  @Get()
+  list(@Req() request: RequestWithAuth) {
+    return this.documents.list(request.workspaceId!);
+  }
+
   @Get(':documentId')
   status(@Req() request: RequestWithAuth, @Param('documentId', new ParseUUIDPipe()) documentId: string) {
     return this.documents.status(request.workspaceId!, documentId);

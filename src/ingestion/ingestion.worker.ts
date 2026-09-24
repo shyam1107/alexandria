@@ -88,7 +88,14 @@ export class IngestionWorker extends WorkerHost {
         // searchVector is gone from the insert list: it is a STORED generated
         // column now, so Postgres derives it from content and the two can
         // never drift apart.
-        for (const { chunkIndex, content, charStart, charEnd, embedding } of embeddedChunks) await tx.insert(documentChunks).values({ documentVersionId, workspaceId, chunkIndex, content, charStart, charEnd, tokenCount: content.split(/\s+/).length, embedding, embeddingModel: this.embeddings.modelName });
+        // One INSERT ... VALUES (...), (...) instead of N round trips: a
+        // 500-chunk document paid 500 sequential awaits inside this tx.
+        await tx.insert(documentChunks).values(
+          embeddedChunks.map(({ chunkIndex, content, charStart, charEnd, embedding }) => ({
+            documentVersionId, workspaceId, chunkIndex, content, charStart, charEnd,
+            tokenCount: content.split(/\s+/).length, embedding, embeddingModel: this.embeddings.modelName,
+          })),
+        );
         await tx.update(documentVersions).set({ status: 'indexed', parserVersion: parsed.parserVersion, embeddingModel: this.embeddings.modelName, updatedAt: new Date() }).where(eq(documentVersions.id, documentVersionId));
         await this.setDocumentStatusIfLatest(tx, documentId, workspaceId, documentVersionId, 'indexed');
       });

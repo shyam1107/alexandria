@@ -2,7 +2,7 @@ import { ConflictException, Injectable, NotFoundException, PayloadTooLargeExcept
 import { Inject } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash, randomUUID } from 'node:crypto';
-import { eq, and, desc } from 'drizzle-orm';
+import { eq, and, desc, ne } from 'drizzle-orm';
 import { Queue } from 'bullmq';
 import { InjectQueue } from '@nestjs/bullmq';
 import type { Db } from '../database/database.module';
@@ -67,7 +67,11 @@ export class DocumentService {
       tx
         .select({ id: documentVersions.id, documentId: documentVersions.documentId })
         .from(documentVersions)
-        .where(and(eq(documentVersions.workspaceId, workspaceId), eq(documentVersions.contentHash, contentHash))),
+        // status filter mirrors the partial unique index: a FAILED version
+        // never indexed, so its hash must not block re-uploading the same
+        // content. Without this the dossier-style failure wedged the file
+        // out of the workspace until manual DB surgery.
+        .where(and(eq(documentVersions.workspaceId, workspaceId), eq(documentVersions.contentHash, contentHash), ne(documentVersions.status, 'failed'))),
     );
     if (duplicate && duplicate.id !== versionId) {
       await this.discardVersion(workspaceId, documentId, versionId, version.objectKey);
@@ -104,6 +108,23 @@ export class DocumentService {
       const versions = await tx.select().from(documentVersions).where(eq(documentVersions.documentId, documentId)).orderBy(desc(documentVersions.createdAt));
       return { ...document, versions };
     });
+  }
+
+  /**
+   * Workspace document list. Latest version first per document; the shape
+   * matches `status()` so the frontend renders one row type. Versions are
+   * omitted here — a list of 200 documents × 5 versions is not a list view.
+   */
+  async list(workspaceId: string) {
+    return withWorkspace(this.db, workspaceId, async (tx) =>
+      tx.select({
+        id: documents.id,
+        title: documents.title,
+        status: documents.status,
+        createdAt: documents.createdAt,
+        updatedAt: documents.updatedAt,
+      }).from(documents).where(eq(documents.workspaceId, workspaceId)).orderBy(desc(documents.updatedAt)),
+    );
   }
 
   /**
