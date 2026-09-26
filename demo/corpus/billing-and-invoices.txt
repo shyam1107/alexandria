@@ -1,0 +1,17 @@
+Billing and Invoices
+
+Northwind Systems bills monthly in arrears. Your invoice is generated on the first working day of each month and covers the previous month's usage. Invoices are sent to the billing contact on the account, which is set separately from the account owner — changing the owner does not change who receives invoices.
+
+Invoices are payable within 30 days of the issue date. We do not offer extended payment terms on monthly plans. Annual plans are invoiced once, in advance, and are payable within 45 days.
+
+After the due date there is a grace period of 10 working days. During the grace period the account continues to work normally and no reminder is sent to end users; only the billing contact is notified. Once the grace period lapses, interest accrues at 4% above the Bank of England base rate, calculated daily on the outstanding balance.
+
+If an invoice remains unpaid 30 days beyond the grace period, the workspace moves to read-only. Existing documents remain searchable and downloadable, but new uploads and new questions are refused. Nothing is deleted. A workspace is restored within one working hour of payment clearing.
+
+Usage above the plan allowance is billed at the overage rate for your tier and appears as a separate line on the same invoice. Overage is never charged mid-month and never interrupts service. If you exceed your allowance by more than 200% in two consecutive months we will contact you about moving tiers, but we will not move you automatically.
+
+Credit notes are issued against the original invoice number and applied to the next invoice rather than refunded, unless the account is closing. Refunds to the original payment method take 5 to 10 working days depending on the card issuer.
+
+To change payment method, the account owner opens Billing and adds the new card before removing the old one. An account cannot be left without a valid payment method while an unpaid invoice exists.
+
+Purchase order numbers can be attached to an account and will appear on every subsequent invoice. We cannot retrospectively add a PO number to an invoice that has already been issued; we can void it and reissue.

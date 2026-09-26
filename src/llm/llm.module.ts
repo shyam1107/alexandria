@@ -11,6 +11,24 @@ import { UsageLedger } from './usage-ledger';
 import { isPriced } from './pricing';
 
 /**
+ * The fail-closed boot check as a pure function, so a spec can prove the
+ * rule itself without compiling the whole DI graph. The module factory
+ * calls this with every (provider, model) identity the process can emit;
+ * a spec that wants to prove "unpriced embedding model refuses to boot"
+ * proves "this function rejects it and the factory calls it".
+ */
+export function assertPricedModels(models: Array<{ label: string; provider: string; model: string }>): void {
+  for (const { label, provider, model } of models) {
+    if (!isPriced(provider, model)) {
+      throw new Error(
+        `${label} ${model} (provider ${provider}) has no declared price in pricing.ts. ` +
+          'Quota enforcement fails closed: declare the price (a genuine zero counts) or point the model at a priced one.',
+      );
+    }
+  }
+}
+
+/**
  * Global for the same reason DatabaseModule is: every phase from 5 onward
  * talks to models, and none of them should re-import wiring. Business logic
  * injects LLM_PROVIDER and never knows which vendor is behind it.
@@ -24,13 +42,14 @@ import { isPriced } from './pricing';
  * query rewriter, which would then search for "This is a scripted answer".
  *
  * PHASE 7 FAIL-CLOSED BOOT CHECK: a chain naming a model with no declared
- * price refuses to boot. Quota enforcement (QuotaGuard) bounds spend by the
- * costs the ledger computes; a model whose cost computes to NULL cannot be
- * bounded, so "unpriced therefore unlimited" would resurface the Phase 6
- * silent-$0 trap as an enforcement hole instead of a measurement hole. The
- * check runs at BOOT, not per request, because an unpriced chain is a
- * configuration error and no amount of traffic self-heals it. Ollama's
- * zero is DECLARED — declared-zero passes, unknown does not.
+ * price refuses to boot — and so does an unpriced EMBEDDING_MODEL. Quota
+ * enforcement (QuotaGuard) bounds spend by the costs the ledger computes; a
+ * model whose cost computes to NULL cannot be bounded, so "unpriced
+ * therefore unlimited" would resurface the Phase 6 silent-$0 trap as an
+ * enforcement hole instead of a measurement hole. The check runs at BOOT,
+ * not per request, because an unpriced chain is a configuration error and no
+ * amount of traffic self-heals it. Ollama's zero is DECLARED — declared-zero
+ * passes, unknown does not.
  */
 @Global()
 @Module({
@@ -59,17 +78,25 @@ import { isPriced } from './pricing';
         // with the model it was constructed with from config; the provider
         // instance knows its own name, so (name, model) identity is
         // available right here, before anything serves a request.
-        for (const provider of providers) {
-          const model = provider instanceof OllamaProvider
-            ? config.get('GENERATION_MODEL', { infer: true })
-            : config.get('GEMINI_MODEL', { infer: true });
-          if (!isPriced(provider.name, model)) {
-            throw new Error(
-              `LLM_CHAIN member ${provider.name} (model ${model}) has no declared price in pricing.ts. ` +
-              'Quota enforcement fails closed: declare the price (a genuine zero counts) or remove the member from LLM_CHAIN.',
-            );
-          }
-        }
+        //
+        // Fail-closed boot check (see the module doc), fixed as a class:
+        // assert pricing over EVERY (provider, model) the process can emit,
+        // not just generation chain members. EmbeddingService records rows
+        // as ('ollama', EMBEDDING_MODEL) by construction — cross-provider
+        // embedding fallback is refused by design — so that identity is
+        // checkable right here. Previously a model swap announced itself as
+        // one logger.warn and then went quiet while the quota counter
+        // silently skipped every embedding call.
+        assertPricedModels([
+          { label: 'EMBEDDING_MODEL', provider: 'ollama', model: config.get('EMBEDDING_MODEL', { infer: true }) },
+          ...providers.map((provider) => ({
+            label: `LLM_CHAIN member ${provider.name}`,
+            provider: provider.name,
+            model: provider instanceof OllamaProvider
+              ? config.get('GENERATION_MODEL', { infer: true })
+              : config.get('GEMINI_MODEL', { infer: true }),
+          })),
+        ]);
         return new ResilientProvider({
           providers,
           maxRetries: config.get('LLM_MAX_RETRIES', { infer: true }),
@@ -77,6 +104,8 @@ import { isPriced } from './pricing';
           retryAfterCapMs: config.get('LLM_RETRY_AFTER_CAP_MS', { infer: true }),
           firstTokenTimeoutMs: config.get('LLM_FIRST_TOKEN_TIMEOUT_MS', { infer: true }),
           idleTimeoutMs: config.get('LLM_IDLE_TIMEOUT_MS', { infer: true }),
+          breakerThreshold: config.get('LLM_BREAKER_THRESHOLD', { infer: true }),
+          breakerCooldownMs: config.get('LLM_BREAKER_COOLDOWN_MS', { infer: true }),
         });
       },
       inject: [ConfigService, OllamaProvider, GeminiProvider],

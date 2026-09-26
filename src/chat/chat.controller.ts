@@ -1,4 +1,4 @@
-import { Body, Controller, HttpException, Post, Req, Res, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpException, Param, ParseUUIDPipe, Post, Req, Res, UseGuards } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import type { Request, Response } from 'express';
 import type { Env } from '../config/env.schema';
@@ -10,6 +10,7 @@ import { QuotaGuard } from './quota.guard';
 import { RateLimiterService } from '../rate-limit/rate-limiter.service';
 import { ChatService, type ChatSink } from './chat.service';
 import { ChatDto } from './dto/chat.dto';
+import { ConversationRepository } from './conversation.repository';
 
 /**
  * POST + SSE over a raw response. Nest's @Sse() is built for GET + RxJS and
@@ -44,11 +45,28 @@ export class ChatController {
 
   constructor(
     private readonly chat: ChatService,
+    private readonly conversations: ConversationRepository,
     private readonly limiter: RateLimiterService,
     config: ConfigService<Env, true>,
   ) {
     this.heartbeatMs = config.get('CHAT_HEARTBEAT_MS', { infer: true });
     this.preFrameDeadlineMs = config.get('CHAT_PRE_FRAME_DEADLINE_MS', { infer: true });
+  }
+
+  // History reads are plain JSON — no SSE, no lease, no heartbeat. The chat
+  // rate-limit guards stay OFF them deliberately: they bound stream starts
+  // and concurrent connections, neither of which a list read is. The global
+  // auth + workspace guards still apply.
+  @Get('conversations')
+  async listConversations(@Req() request: RequestWithAuth) {
+    return this.conversations.listConversations(request.workspaceId!, 50);
+  }
+
+  @Get('conversations/:conversationId/messages')
+  async listMessages(@Req() request: RequestWithAuth, @Param('conversationId', new ParseUUIDPipe()) conversationId: string) {
+    const conversation = await this.conversations.getConversation(request.workspaceId!, conversationId);
+    if (!conversation) throw new HttpException('Conversation not found', 404);
+    return this.conversations.history(request.workspaceId!, conversationId, 200);
   }
 
   @Post()

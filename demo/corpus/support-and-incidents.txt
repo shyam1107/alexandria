@@ -1,0 +1,17 @@
+Support and Incident Response
+
+Support is available Monday to Friday, 08:00 to 18:00 UK time, excluding English bank holidays. Enterprise accounts additionally have weekend cover for critical issues only.
+
+Tickets are triaged into four severities. Critical means the product is unavailable or data is at risk; we respond within one working hour and work continuously until there is a workaround. High means a major feature is unusable with no workaround; we respond within four working hours. Normal means degraded or inconvenient behaviour with a workaround; we respond within one working day. Low covers questions and feature requests; we respond within three working days.
+
+Response time is time to first human reply, not time to resolution. We do not publish resolution targets, because a resolution time we could guarantee would be a resolution time we had padded.
+
+Error code E429 means you have exceeded the request rate limit for your plan. It is returned with a Retry-After header indicating how long to wait. E429 is not an outage and does not count against uptime. If you see E429 during normal use rather than during a bulk import, contact support — it usually means an integration is retrying without backoff.
+
+Error code E503 means the answering service is temporarily unavailable, usually because an upstream model provider is degraded. The system fails over to a secondary provider automatically; a sustained E503 means both providers are unavailable and will appear on the status page.
+
+Planned maintenance is announced at least five working days in advance and scheduled between 22:00 and 02:00 UK time. Maintenance windows do not count against the uptime commitment. Emergency maintenance, which is rare, is announced as it happens.
+
+The uptime commitment is 99.9% measured monthly, excluding planned maintenance. If we miss it, service credits are applied automatically to the next invoice — you do not need to claim them. Credits are capped at one month's fee.
+
+To escalate a ticket, reply to it asking for escalation and state the business impact. Escalation is a routing decision, not a severity change; a Normal ticket that is escalated is still a Normal ticket, but a named engineer owns it.

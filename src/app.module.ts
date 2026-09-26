@@ -13,6 +13,7 @@ import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { IngestionApiModule } from './ingestion/ingestion-api.module';
 import { RetrievalModule } from './retrieval/retrieval.module';
 import { LlmModule } from './llm/llm.module';
+import { DemoUiModule } from './demo-ui/demo-ui.module';
 import { ChatModule } from './chat/chat.module';
 import { AuthModule } from './auth/auth.module';
 
@@ -45,6 +46,7 @@ import { AuthModule } from './auth/auth.module';
     IngestionApiModule,
     RetrievalModule,
     LlmModule,
+    DemoUiModule,
     ChatModule,
     AuthModule,
   ],

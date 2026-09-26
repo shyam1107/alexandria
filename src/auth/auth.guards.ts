@@ -19,6 +19,8 @@ export class AccessTokenGuard implements CanActivate {
   }
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 @Injectable()
 export class WorkspaceMemberGuard implements CanActivate {
   constructor(@Inject(DRIZZLE) private readonly db: Db) {}
@@ -26,6 +28,12 @@ export class WorkspaceMemberGuard implements CanActivate {
     const request = context.switchToHttp().getRequest<RequestWithAuth>();
     const workspaceId = request.headers['x-workspace-id'];
     if (!request.user || typeof workspaceId !== 'string') throw new ForbiddenException('Workspace context required');
+    // Shape-check before the query. `eq(memberships.workspaceId, 'garbage')`
+    // makes Postgres raise 22P02 (invalid input syntax for type uuid), which
+    // surfaces as 500 rather than 403 — an authenticated caller can turn a
+    // typo into an error-rate spike. A malformed id cannot match a membership
+    // by definition, so refusing it here costs nothing.
+    if (!UUID_PATTERN.test(workspaceId)) throw new ForbiddenException('User is not a member of this workspace');
     const [membership] = await this.db.select({ workspaceId: memberships.workspaceId }).from(memberships).where(and(eq(memberships.workspaceId, workspaceId), eq(memberships.userId, request.user.userId)));
     if (!membership) throw new ForbiddenException('User is not a member of this workspace');
     request.workspaceId = membership.workspaceId;

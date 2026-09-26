@@ -7,7 +7,7 @@ import type { LlmEvent, LlmProvider, Message } from '../llm/llm.types';
 import { UsageLedger } from '../llm/usage-ledger';
 import { RetrievalService } from '../retrieval/retrieval.service';
 import { assembleContext, trimHistory } from './context-assembler';
-import { extractCitations } from './citations';
+import { extractCitations, stripCitationMarkers } from './citations';
 import { ConversationRepository } from './conversation.repository';
 import { QueryRewriterService } from './query-rewriter.service';
 import { ANSWER_SYSTEM_PROMPT, BLOCKED_REFUSAL, NO_CONTEXT_REFUSAL, PROMPT_VERSION, buildAnswerUserMessage } from './prompt';
@@ -37,6 +37,27 @@ const PROMPT_MARGIN_TOKENS = 256;
  */
 export interface ChatSink {
   event(name: 'sources' | 'delta' | 'usage' | 'done' | 'error', data: unknown): void;
+}
+
+/**
+ * Reads `messages.citations` across both shapes it has had.
+ *
+ * Phase 5 stored a bare array of the CITED sources. Phase 7b stores
+ * `{ sources, cited }` — everything served, plus which the answer pointed at
+ * — because replay served the old value as if it were the full list, so a
+ * reloaded conversation showed fewer chips than the live stream had.
+ *
+ * Old rows are not migrated and cannot be: the uncited sources were never
+ * written down, so nothing can reconstruct them. They keep replaying exactly
+ * as they always did. The fix is forward-only by construction, which is worth
+ * knowing before someone writes a backfill that invents data.
+ */
+export function storedSources(value: unknown): ContextSource[] {
+  if (Array.isArray(value)) return value as ContextSource[];
+  if (value && typeof value === 'object' && Array.isArray((value as { sources?: unknown }).sources)) {
+    return (value as { sources: ContextSource[] }).sources;
+  }
+  return [];
 }
 
 @Injectable()
@@ -83,7 +104,7 @@ export class ChatService {
       if (prior) {
         const answer = await this.repo.completedAnswerAfter(workspaceId, conversationId, prior.seq);
         if (answer) {
-          sink.event('sources', { conversationId, sources: (answer.citations as ContextSource[] | null) ?? [] });
+          sink.event('sources', { conversationId, sources: storedSources(answer.citations) });
           sink.event('delta', { text: answer.content });
           sink.event('usage', { promptTokens: answer.promptTokens ?? 0, completionTokens: answer.completionTokens ?? 0 });
           sink.event('done', {
@@ -107,8 +128,15 @@ export class ChatService {
     //    must not appear in its own context. On the retry path that turn is
     //    already persisted, so it is excluded by seq instead.
     const historyRows = await this.repo.history(workspaceId, conversationId, this.historyLimit, priorSeq);
+    // Strip stale [n] markers ONCE, here, before anything reads history: the
+    // prompt, the query rewriter and the token budget must all see the same
+    // text. Those numbers indexed an earlier turn's source list; this turn
+    // numbers a different list from 1, so replaying them tells the model a
+    // number it is about to reuse already means something else. The stored
+    // rows keep their markers — they are the record of what was served.
+    const cleaned = historyRows.map((row) => (row.role === 'assistant' ? { ...row, content: stripCitationMarkers(row.content) } : row));
     // A message COUNT is not a size bound. Cap by tokens too, oldest first.
-    const history = trimHistory(historyRows, this.historyBudget, (text) => this.llm.countTokens(text));
+    const history = trimHistory(cleaned, this.historyBudget, (text) => this.llm.countTokens(text));
     if (!userTurnPersisted) {
       await this.repo.insertMessage(workspaceId, {
         conversationId,
@@ -280,7 +308,13 @@ export class ChatService {
     // 10. Validate citations post-hoc (they're already on the wire — stripping
     //     was never an option), then terminate the stream: usage, then done.
     const { resolved, unresolved } = extractCitations(answer, context.sources.length);
-    const citations = resolved.map((n) => context.sources[n - 1]);
+    // Persist what was SERVED, plus which of it the answer cited — not the
+    // cited subset alone. Storing only the cited ones made a replayed
+    // conversation show fewer source chips than the live stream did, for the
+    // same answer: the live `sources` frame carries everything retrieval
+    // put in the prompt, so a reload silently dropped the rest. `cited`
+    // keeps the information the old shape had.
+    const citations = { sources: context.sources, cited: resolved };
     sink.event('usage', doneEvent.usage);
     sink.event('done', {
       conversationId,

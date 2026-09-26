@@ -1,0 +1,17 @@
+Security and Access
+
+Every workspace is isolated at the database level, not only in application code. Queries carry the workspace identity into the database, and the database itself refuses rows belonging to another workspace even if the application asks for them. This means a bug in our own code cannot leak one customer's documents to another.
+
+Documents are encrypted at rest and in transit. Uploads go directly from your browser to object storage using a time-limited signed link; the link expires after fifteen minutes and is bound to the exact file size declared, so it cannot be reused to upload something else.
+
+Access is by email and password today. Passwords are stored using scrypt with per-user salts and are never logged. Sessions consist of a short-lived access token, valid for fifteen minutes, and a longer-lived refresh token. Refresh tokens rotate on every use: if a stolen token is used after the legitimate one, the entire session family is revoked and both parties are signed out.
+
+Single sign-on through SAML or OIDC is not currently supported. It is the most requested item on our roadmap but there is no committed date.
+
+Workspace roles exist in the data model — owner, admin, member — but are not yet enforced. Every member of a workspace currently has the same permissions. Do not rely on roles as a security boundary until this note is removed.
+
+We do not train models on your documents. Content is sent to a model provider only to answer a specific question, and providers are contractually bound not to retain it for training. Answers are generated only from retrieved passages of your own documents; the system is instructed to refuse rather than answer from general knowledge, and refusals are expected behaviour rather than a fault.
+
+Deleting a document removes it from search immediately and purges the stored file. Deleting a workspace removes all documents, conversations, and usage records within seven days. Backups are retained for thirty days and are also purged on that schedule.
+
+We publish a status page and notify the security contact on the account of any incident involving customer data within 72 hours, whether or not we are legally required to.

@@ -35,4 +35,17 @@ describe('computeCostMicroUsd', () => {
     // A failed call reports null tokens; a flat-price provider still costs $0.
     expect(computeCostMicroUsd('ollama', 'nomic-embed-text', null, null)).toBe(0n);
   });
+
+  it('a metered model with unknown tokens costs NULL, not a confident $0', () => {
+    // The failure mode this guards: a provider error or aborted stream where
+    // usage never arrived. Token columns store NULL; cost_micro_usd must not
+    // sum as $0 in a dashboard. Before item [5] this computed 0n.
+    expect(computeCostMicroUsd('gemini', 'gemini-3.1-flash-lite', null, null)).toBeNull();
+  });
+
+  it('a metered model with ONE known token side still computes a cost', () => {
+    // Partial usage (e.g. an aborted stream that still reported prompt
+    // tokens) is not "unknown" — the known side is billed.
+    expect(computeCostMicroUsd('gemini', 'gemini-3.1-flash-lite', 100, null)).toBe(25n);
+  });
 });

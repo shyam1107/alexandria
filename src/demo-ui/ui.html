@@ -1,0 +1,538 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Alexandria</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Spectral:ital,wght@0,400;0,500;1,400&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#FCFBF8; --ink:#14171B; --rule:#E2DDD2; --stamp:#8A2B2B;
+    --moss:#2F4A3C; --muted:#6E6B63; --raise:#F5F2EA;
+    --serif:'Spectral',Georgia,'Times New Roman',serif;
+    --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);font-size:15px;line-height:1.5;
+       -webkit-font-smoothing:antialiased}
+  button{font:inherit;cursor:pointer}
+  input{font:inherit}
+
+  /* ---------- masthead ---------- */
+  .masthead{display:flex;align-items:baseline;gap:14px;padding:20px 32px 16px;border-bottom:1px solid var(--rule)}
+  .wordmark{font-family:var(--serif);font-size:23px;font-weight:500;letter-spacing:-0.01em}
+  .place{color:var(--muted);font-size:13px}
+  .place b{font-weight:500;color:var(--ink)}
+  .masthead .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+
+  /* ---------- sign in ---------- */
+  .signin{max-width:380px;margin:14vh auto;padding:0 24px}
+  .signin h1{font-family:var(--serif);font-weight:400;font-size:30px;margin:0 0 6px;letter-spacing:-0.01em}
+  .signin p{color:var(--muted);margin:0 0 26px;font-size:14px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12.5px;color:var(--muted);margin-bottom:5px}
+  .field input{width:100%;padding:9px 11px;border:1px solid var(--rule);border-radius:3px;background:#fff;color:var(--ink)}
+  .field input:focus{outline:2px solid var(--moss);outline-offset:-1px;border-color:transparent}
+
+  .primary{background:var(--moss);color:#fff;border:none;border-radius:3px;padding:9px 16px;font-weight:500}
+  .primary:hover{background:#263d31}
+  .primary:disabled{opacity:.5;cursor:default}
+  .quiet{background:none;border:1px solid var(--rule);border-radius:3px;padding:7px 12px;color:var(--ink)}
+  .quiet:hover{background:var(--raise)}
+
+  /* ---------- ask ---------- */
+  .ask{padding:26px 32px 0;max-width:1180px;margin:0 auto;width:100%}
+  .askrow{display:flex;gap:10px;max-width:calc(100% - 312px)} /* aligns with the answer column, not the margin */
+  .askrow input{flex:1;padding:11px 13px;border:1px solid var(--rule);border-radius:3px;background:#fff;
+                font-family:var(--serif);font-size:16px}
+  .askrow input:focus{outline:2px solid var(--moss);outline-offset:-1px;border-color:transparent}
+  .presets{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px;max-width:calc(100% - 312px)}
+  .preset{background:none;border:1px solid var(--rule);border-radius:99px;padding:4px 12px;font-size:13px;color:var(--muted)}
+  .preset:hover{border-color:var(--moss);color:var(--moss)}
+
+  /* ---------- the spread: answer + margin ---------- */
+  .spread{display:grid;grid-template-columns:minmax(0,1fr) 268px;gap:44px;
+          max-width:1180px;margin:0 auto;padding:30px 32px 80px;width:100%}
+  .question{font-family:var(--serif);font-size:20px;line-height:1.35;margin:0 0 18px;letter-spacing:-0.01em}
+  .answer{font-family:var(--serif);font-size:17.5px;line-height:1.62;max-width:60ch;white-space:pre-wrap}
+  .answer.thinking::after{content:'';display:inline-block;width:8px;height:17px;background:var(--ink);
+                          margin-left:2px;vertical-align:-2px;animation:blink 1.1s steps(2) infinite}
+  @keyframes blink{50%{opacity:0}}
+
+  /* citation numerals — the one place oxblood appears */
+  .cite{font-family:var(--sans);font-size:11px;font-weight:600;color:var(--stamp);
+        vertical-align:super;line-height:0;padding:0 1px;cursor:pointer;background:none;border:none}
+  .cite:hover,.cite.lit{background:#F2E4E4;border-radius:2px}
+
+  .margin{border-left:1px solid var(--rule);padding-left:20px}
+  .source{padding:11px 0;border-bottom:1px solid var(--rule)}
+  .source:last-child{border-bottom:none}
+  .source.lit{background:#F7F1E9;margin:0 -10px;padding-left:10px;padding-right:10px}
+  .source .n{color:var(--stamp);font-size:11px;font-weight:600;margin-right:6px}
+  .source .doc{font-size:12.5px;font-weight:500}
+  .source .quote{font-family:var(--serif);font-size:13.5px;line-height:1.45;color:var(--muted);margin-top:5px}
+  .source.unused{opacity:.42}
+  .source.unused .n{color:var(--muted)}
+  .margin .searched{color:var(--muted);font-size:12px;padding-top:14px;line-height:1.45}
+  .margin .empty{color:var(--muted);font-size:13px;line-height:1.5}
+
+  /* ---------- disclosure ---------- */
+  .why{margin-top:30px;max-width:60ch}
+  .why summary{cursor:pointer;color:var(--moss);font-size:13.5px;width:max-content}
+  .why summary::marker{color:var(--rule)}
+  .why .inner{margin-top:12px;padding:14px 16px;background:var(--raise);border-radius:3px;font-size:13.5px}
+  .why table{width:100%;border-collapse:collapse}
+  .why td{padding:4px 0;vertical-align:top}
+  .why td:first-child{color:var(--stamp);font-weight:600;width:22px}
+  .why .how{color:var(--muted)}
+  .why .note{color:var(--muted);margin:10px 0 0;line-height:1.5}
+
+  .status{color:var(--muted);font-size:13.5px}
+  .error{color:var(--stamp);font-size:13.5px;max-width:60ch}
+  .hidden{display:none!important}
+
+  /* ---------- add a document ---------- */
+  dialog{border:1px solid var(--rule);border-radius:4px;padding:24px;max-width:420px;background:var(--paper);color:var(--ink)}
+  dialog::backdrop{background:rgba(20,23,27,.35)}
+  dialog h2{font-family:var(--serif);font-weight:400;font-size:21px;margin:0 0 4px}
+  dialog p{color:var(--muted);font-size:13.5px;margin:0 0 16px}
+  .dlg-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:18px}
+
+  @media (max-width:900px){
+    .askrow,.presets{max-width:none}
+    .spread{grid-template-columns:1fr;gap:26px}
+    .margin{border-left:none;border-top:1px solid var(--rule);padding-left:0;padding-top:16px}
+  }
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<!-- ============ sign in ============ -->
+<section id="signin" class="signin">
+  <h1>Alexandria</h1>
+  <p>Ask questions of your workspace's documents, and see where every answer came from.</p>
+  <div class="field"><label for="email">Email</label><input id="email" type="email" autocomplete="username"></div>
+  <div class="field"><label for="password">Password</label><input id="password" type="password" autocomplete="current-password"></div>
+  <button class="primary" id="signin-btn" style="margin-top:8px">Sign in</button>
+  <p id="signin-msg" class="error" style="margin-top:14px"></p>
+</section>
+
+<!-- ============ app ============ -->
+<div id="app" class="hidden">
+  <header class="masthead">
+    <span class="wordmark">Alexandria</span>
+    <span class="place">Answering from <b id="ws-name">—</b></span>
+    <span class="right">
+      <button class="quiet" id="add-doc">Add a document</button>
+    </span>
+  </header>
+
+  <div class="ask">
+    <div class="askrow">
+      <input id="q" placeholder="Ask about billing, support, security, or getting started" autocomplete="off">
+      <button class="primary" id="ask-btn">Ask</button>
+    </div>
+    <div class="presets" id="presets"></div>
+  </div>
+
+  <main class="spread">
+    <div>
+      <h2 class="question hidden" id="question"></h2>
+      <div class="answer" id="answer"></div>
+      <p class="status hidden" id="status"></p>
+      <p class="error hidden" id="error"></p>
+
+      <details class="why hidden" id="why">
+        <summary>Why this answer?</summary>
+        <div class="inner" id="why-inner"></div>
+      </details>
+    </div>
+    <aside class="margin" id="margin"></aside>
+  </main>
+</div>
+
+<dialog id="upload-dlg">
+  <h2>Add a document</h2>
+  <p>Plain text or Markdown. It will be split into passages and indexed before it can be answered from.</p>
+  <input type="file" id="file" accept=".txt,.md,text/plain,text/markdown">
+  <p class="status" id="upload-status" style="margin-top:12px"></p>
+  <div class="dlg-actions">
+    <button class="quiet" id="upload-cancel">Cancel</button>
+    <button class="primary" id="upload-go">Upload</button>
+  </div>
+</dialog>
+
+<script>
+const API = '/api/v1';
+const state = { token: null, workspaceId: null, conversationId: null, sources: [] };
+
+const $ = (id) => document.getElementById(id);
+const show = (el, on = true) => el.classList.toggle('hidden', !on);
+
+async function call(path, { method = 'GET', body, auth = true } = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (auth && state.token) headers.authorization = `Bearer ${state.token}`;
+  if (auth && state.workspaceId) headers['x-workspace-id'] = state.workspaceId;
+  const res = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+  const text = await res.text();
+  return { ok: res.ok, status: res.status, body: text ? JSON.parse(text) : undefined };
+}
+
+/* ---------------- sign in ---------------- */
+async function boot() {
+  const res = await fetch('/ui/config');
+  if (res.ok) {
+    const cfg = await res.json();
+    $('email').value = cfg.email;
+    $('password').value = cfg.password;
+    state.workspaceId = cfg.workspaceId;
+    $('ws-name').textContent = cfg.workspaceName;
+  } else {
+    $('signin-msg').textContent = 'No demo workspace yet. Run `pnpm demo:seed` in the project, then reload.';
+  }
+}
+
+$('signin-btn').onclick = async () => {
+  $('signin-msg').textContent = '';
+  const out = await call('/auth/login', {
+    method: 'POST', auth: false,
+    body: { email: $('email').value.trim(), password: $('password').value },
+  });
+  if (!out.ok) {
+    $('signin-msg').textContent = out.status === 401
+      ? 'That email and password do not match an account.'
+      : `Sign in failed (${out.status}). Is the API running?`;
+    return;
+  }
+  state.token = out.body.accessToken;
+  show($('signin'), false);
+  show($('app'), true);
+  $('q').focus();
+};
+
+/* ---------------- presets ---------------- */
+const PRESETS = [
+  'How long do I have to pay an invoice?',
+  'What does E429 mean?',
+  'Do you support single sign-on?',
+  'Can I integrate this with Slack?',
+];
+PRESETS.forEach((text) => {
+  const b = document.createElement('button');
+  b.className = 'preset';
+  b.textContent = text;
+  b.onclick = () => { $('q').value = text; ask(); };
+  $('presets').appendChild(b);
+});
+
+/* ---------------- citations ---------------- */
+// [1] in the model's output becomes a superscript numeral bound to its margin
+// card. Rendered from the accumulated text each tick so a citation split
+// across two stream chunks still resolves once both have arrived.
+function renderAnswer(text) {
+  const el = $('answer');
+  el.textContent = '';
+  const parts = text.split(/(\[\d+\])/g);
+  for (const part of parts) {
+    const m = /^\[(\d+)\]$/.exec(part);
+    if (m && state.sources.some((s) => String(s.n) === m[1])) {
+      const b = document.createElement('button');
+      b.className = 'cite';
+      b.textContent = m[1];
+      b.title = `Source ${m[1]}`;
+      b.onmouseenter = () => highlight(m[1], true);
+      b.onmouseleave = () => highlight(m[1], false);
+      b.onclick = () => document.querySelector(`.source[data-n="${m[1]}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.appendChild(b);
+    } else {
+      el.appendChild(document.createTextNode(part));
+    }
+  }
+}
+
+function highlight(n, on) {
+  document.querySelector(`.source[data-n="${n}"]`)?.classList.toggle('lit', on);
+  document.querySelectorAll(`.cite`).forEach((c) => { if (c.textContent === n) c.classList.toggle('lit', on); });
+}
+
+function renderMargin() {
+  const box = $('margin');
+  box.textContent = '';
+  if (!state.sources.length) {
+    const p = document.createElement('p');
+    p.className = 'empty';
+    p.textContent = 'Nothing in this workspace matched closely enough to answer from. With no passages to quote, the answer is a refusal rather than a guess.';
+    box.appendChild(p);
+    return;
+  }
+  const cited = state.cited ?? null;
+  let seenUnused = false;
+  for (const s of state.sources) {
+    const used = !cited || cited.has(s.n);
+    // Everything retrieved is shown — hiding the unused ones would overstate
+    // precision — but only what the answer actually leaned on reads as solid.
+    if (!used && !seenUnused) {
+      seenUnused = true;
+      const label = document.createElement('p');
+      label.className = 'searched';
+      label.textContent = 'Also searched, not used in this answer:';
+      box.appendChild(label);
+    }
+    const card = document.createElement('div');
+    card.className = used ? 'source' : 'source unused';
+    card.dataset.n = s.n;
+    card.onmouseenter = () => highlight(String(s.n), true);
+    card.onmouseleave = () => highlight(String(s.n), false);
+    const head = document.createElement('div');
+    head.innerHTML = `<span class="n">${s.n}</span>`;
+    const doc = document.createElement('span');
+    doc.className = 'doc';
+    doc.textContent = s.documentTitle;
+    head.appendChild(doc);
+    card.appendChild(head);
+    if (s.quote) {
+      const q = document.createElement('p');
+      q.className = 'quote';
+      q.textContent = `“${s.quote}”`;
+      card.appendChild(q);
+    }
+    box.appendChild(card);
+  }
+}
+
+/* The sources frame carries no passage text — only which chunk was used — so
+   the quotes come from /search, which returns content for the same question.
+   A backend that included the text in the frame would make this call go away. */
+async function hydrateQuotes(question) {
+  const out = await call('/search', { method: 'POST', body: { query: question, topK: 10 } });
+  if (!out.ok) return;
+  const byId = new Map((out.body.results ?? []).map((r) => [r.chunkId, r.content]));
+  for (const s of state.sources) {
+    const full = byId.get(s.chunkId);
+    if (full) s.quote = bestPassage(full, question);
+  }
+  renderMargin();
+}
+
+/* Show the sentence that actually answers, not the first 220 characters.
+   Passages here are whole merged documents, so quoting from the top shows the
+   document's opening line regardless of the question — which reads as if the
+   citation were arbitrary. Scoring sentences by overlap with the question and
+   quoting the winner plus its neighbour is what makes the margin evidence
+   rather than decoration. */
+const STOPWORDS = new Set(['the','and','for','are','you','your','can','how','what','does','did','with','from','that','this','have','has','been','was','were','will','would','should','about','into','when','where','which','who','why','long','much','many','get','got','all','any','not','but','its','our']);
+
+function bestPassage(content, question) {
+  // Score by DISTINCT question terms matched, not total hits. "How long do I
+  // have to pay an invoice?" reduces to {pay, invoice}: every sentence in a
+  // billing document contains "invoice", so counting hits ties them all and
+  // the document's opening line wins by position. Requiring both terms picks
+  // the sentence that actually answers.
+  //
+  // Three characters, not four — dropping "pay" was exactly what made the
+  // first attempt quote the wrong line. Stopwords carry the weight instead.
+  const terms = [...new Set((question.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []).filter((t) => !STOPWORDS.has(t)))];
+  const sentences = content.split(/(?<=[.!?])\s+/).filter((x) => x.trim().length > 20);
+  if (!sentences.length || !terms.length) return clip(content);
+
+  let bestIndex = -1;
+  let bestScore = 0;
+  sentences.forEach((sentence, i) => {
+    const low = sentence.toLowerCase();
+    const score = terms.reduce((n, t) => n + (low.includes(t) ? 1 : 0), 0);
+    if (score > bestScore) { bestScore = score; bestIndex = i; }
+  });
+  if (bestIndex === -1) return clip(content);
+
+  // The following sentence usually carries the qualifier — a grace period, an
+  // exception — so the quote does not read as more absolute than the document.
+  return clip(sentences.slice(bestIndex, bestIndex + 2).join(' '));
+}
+
+function clip(text) {
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t.length > 240 ? t.slice(0, 240).trimEnd() + '…' : t;
+}
+
+/* ---------------- ask ---------------- */
+let asking = false;
+async function ask() {
+  const question = $('q').value.trim();
+  if (!question || asking) return;
+  asking = true;
+  $('ask-btn').disabled = true;
+
+  state.sources = [];
+  state.cited = null;
+  $('question').textContent = question;
+  show($('question'), true);
+  $('answer').textContent = '';
+  $('answer').classList.add('thinking');
+  $('margin').textContent = '';
+  show($('why'), false);
+  show($('error'), false);
+  $('status').textContent = 'Searching the workspace…';
+  show($('status'), true);
+
+  let answer = '';
+  let debug = null;
+  try {
+    const res = await fetch(API + '/chat', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${state.token}`,
+        'x-workspace-id': state.workspaceId,
+      },
+      body: JSON.stringify({ message: question, conversationId: state.conversationId ?? undefined, debug: true }),
+    });
+
+    if (!res.ok || !res.body) {
+      const detail = await res.text();
+      throw new Error(res.status === 429
+        ? 'Rate limit reached. Wait a moment and ask again.'
+        : `The server refused the question (${res.status}). ${detail.slice(0, 160)}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const frames = buffer.split('\n\n');
+      buffer = frames.pop() ?? '';
+      for (const frame of frames) {
+        if (!frame.trim() || frame.startsWith(':')) continue; // heartbeat
+        const name = /^event: (.+)$/m.exec(frame)?.[1];
+        const raw = /^data: (.+)$/m.exec(frame)?.[1];
+        if (!name || !raw) continue;
+        const data = JSON.parse(raw);
+
+        if (name === 'sources') {
+          state.conversationId = data.conversationId;
+          state.sources = data.sources ?? [];
+          debug = data.retrieval ?? null;
+          $('status').textContent = state.sources.length
+            ? `Reading ${state.sources.length} passage${state.sources.length > 1 ? 's' : ''}…`
+            : 'No matching passages found.';
+          renderMargin();
+        } else if (name === 'delta') {
+          show($('status'), false);
+          answer += data.text;
+          renderAnswer(answer);
+        } else if (name === 'error') {
+          throw new Error('The answer stopped part-way through. What arrived is shown above.');
+        } else if (name === 'done') {
+          $('answer').classList.remove('thinking');
+          state.cited = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])));
+          renderMargin();
+          renderWhy(data, debug);
+        }
+      }
+    }
+    $('answer').classList.remove('thinking');
+    show($('status'), false);
+    if (state.sources.length) hydrateQuotes(question);
+  } catch (e) {
+    $('answer').classList.remove('thinking');
+    show($('status'), false);
+    $('error').textContent = e.message;
+    show($('error'), true);
+  } finally {
+    asking = false;
+    $('ask-btn').disabled = false;
+  }
+}
+$('ask-btn').onclick = ask;
+$('q').addEventListener('keydown', (e) => { if (e.key === 'Enter') ask(); });
+
+/* ---------------- why this answer ---------------- */
+// Plain language on purpose: "matched on meaning" and "matched on wording"
+// are what the two retrieval legs actually do, said in words that mean
+// something to someone who does not know what an embedding is.
+function renderWhy(done, debug) {
+  const inner = $('why-inner');
+  inner.textContent = '';
+  if (!state.sources.length) {
+    inner.innerHTML = '<p class="note" style="margin:0">The search found nothing close enough to quote, so the answer is a refusal. Answers are written only from passages of your own documents — never from what the model happens to know.</p>';
+    show($('why'), true);
+    return;
+  }
+  const table = document.createElement('table');
+  for (const s of state.sources) {
+    const tr = document.createElement('tr');
+    const n = document.createElement('td'); n.textContent = s.n;
+    const d = document.createElement('td'); d.textContent = s.documentTitle;
+    tr.append(n, d);
+    table.appendChild(tr);
+  }
+  inner.appendChild(table);
+
+  const note = document.createElement('p');
+  note.className = 'note';
+  const legs = debug?.candidates;
+  note.textContent = legs
+    ? `Two searches ran at once: one matched on meaning and found ${legs.vector} passages, one matched on exact wording and found ${legs.fts}. The results were merged, and the best few were given to the model as the only material it was allowed to use.`
+    : 'Two searches ran at once — one on meaning, one on exact wording. Their results were merged, and the best few were given to the model as the only material it was allowed to use.';
+  inner.appendChild(note);
+
+  if (done?.unresolvedCitations?.length) {
+    const warn = document.createElement('p');
+    warn.className = 'note';
+    warn.textContent = `The answer cited ${done.unresolvedCitations.length} source that was not among those retrieved. That is flagged rather than hidden.`;
+    inner.appendChild(warn);
+  }
+  show($('why'), true);
+}
+
+/* ---------------- upload ---------------- */
+const dlg = $('upload-dlg');
+$('add-doc').onclick = () => { $('upload-status').textContent = ''; dlg.showModal(); };
+$('upload-cancel').onclick = () => dlg.close();
+$('upload-go').onclick = async () => {
+  const file = $('file').files?.[0];
+  if (!file) { $('upload-status').textContent = 'Choose a file first.'; return; }
+  const say = (m) => { $('upload-status').textContent = m; };
+  try {
+    say('Requesting an upload link…');
+    const created = await call('/documents', {
+      method: 'POST',
+      body: { filename: file.name, contentType: 'text/plain', byteSize: file.size },
+    });
+    if (!created.ok) throw new Error(`Could not start the upload (${created.status}).`);
+
+    // The signed link is bound to this exact size — the browser sets
+    // Content-Length from the body, so it must be the same file we declared.
+    say('Uploading…');
+    const put = await fetch(created.body.uploadUrl, { method: 'PUT', body: file, headers: { 'content-type': 'text/plain' } });
+    if (!put.ok) throw new Error('Object storage rejected the upload.');
+
+    say('Indexing…');
+    const done = await call(`/documents/${created.body.document.id}/complete`, {
+      method: 'POST', body: { versionId: created.body.versionId },
+    });
+    if (done.status === 409) throw new Error('That document is already in this workspace.');
+    if (!done.ok) throw new Error(`Could not finish the upload (${done.status}).`);
+
+    const deadline = Date.now() + 120000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 1500));
+      const st = await call(`/documents/${created.body.document.id}`);
+      if (st.body?.status === 'indexed') { say('Indexed. You can ask about it now.'); return; }
+      if (st.body?.status === 'failed') throw new Error('Indexing failed. Check the worker log.');
+    }
+    throw new Error('Still indexing. Is the worker running?');
+  } catch (e) {
+    say(e.message);
+  }
+};
+
+boot();
+</script>
+</body>
+</html>

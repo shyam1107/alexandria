@@ -15,7 +15,23 @@ export class ParserService {
       const parser = new PDFParse({ data: buffer });
       try {
         const result = await parser.getText();
-        return { text: result.text.trim(), parserVersion: 'pdf-parse-2' };
+        const text = result.text.trim();
+        // A scanned PDF has no text layer: extraction yields only page
+        // furniture (numbers, headers) or nothing. Indexing that garbage
+        // makes the document "searchable" for queries it can never answer.
+        // Fail honestly instead — the user needs OCR, not a silent dud.
+        if (text.replace(/[^a-zA-Z0-9]/g, '').length < 20) {
+          throw new UnprocessableEntityException('PDF has no extractable text (likely scanned images); run OCR before uploading');
+        }
+        return { text, parserVersion: 'pdf-parse-2' };
+      } catch (error) {
+        // "No password given" / "Incorrect Password": the PDF carries a user
+        // password (bank statements, invoices). We never accept passwords —
+        // decrypt locally before uploading. Raw message is cryptic in the UI.
+        if (error instanceof Error && /password/i.test(error.message)) {
+          throw new UnprocessableEntityException('PDF is password-protected; decrypt it before uploading');
+        }
+        throw error;
       } finally {
         await parser.destroy();
       }

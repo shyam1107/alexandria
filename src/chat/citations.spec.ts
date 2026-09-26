@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractCitations } from './citations';
+import { extractCitations, stripCitationMarkers } from './citations';
 
 describe('extractCitations', () => {
   it('resolves markers that exist in the context', () => {
@@ -26,3 +26,18 @@ describe('extractCitations', () => {
     expect(extractCitations('I do not know based on the available documents.', 5)).toEqual({ resolved: [], unresolved: [] });
   });
 });
+
+describe('stripCitationMarkers', () => {
+  it('removes markers that indexed a previous turn\'s source list', () => {
+    expect(stripCitationMarkers('Refunds take 30 days [1]. See also [2].')).toBe('Refunds take 30 days. See also.');
+  });
+
+  it('leaves non-numeric brackets alone — prose and code are not citations', () => {
+    expect(stripCitationMarkers('Use arr[i] and note [sic] the caveat.')).toBe('Use arr[i] and note [sic] the caveat.');
+  });
+
+  it('is a no-op on text that never carried markers', () => {
+    expect(stripCitationMarkers('No citations here at all.')).toBe('No citations here at all.');
+  });
+});
+

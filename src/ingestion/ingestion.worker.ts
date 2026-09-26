@@ -1,11 +1,11 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { Processor, WorkerHost } from '@nestjs/bullmq';
 import { Job } from 'bullmq';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import type { Db } from '../database/database.module';
 import { DRIZZLE } from '../database/database.module';
-import { withWorkspace } from '../database/tenant';
-import { documentChunks, documentVersions, documents } from '../database/schema';
+import { withWorkspace, type Tx } from '../database/tenant';
+import { documentChunks, documentVersions } from '../database/schema';
 import { INGESTION_QUEUE, type IngestDocumentJob } from './ingestion.constants';
 import { StorageService } from './storage.service';
 import { ParserService } from './parser.service';
@@ -36,6 +36,35 @@ export class IngestionWorker extends WorkerHost {
     private readonly embeddings: EmbeddingService,
   ) { super(); }
 
+  /**
+   * Document-level status is the LATEST version's status, not the most
+   * recently finished one.
+   *
+   * Without the guard these two rows drift apart the moment a document has
+   * more than one version: re-upload v2, and if v1's job finishes after v2's
+   * (retry, slower parse, requeue) the document reads `indexed` from a
+   * version nobody will ever be served, or `failed` because a superseded
+   * version failed. `document_versions.status` was always correct; the
+   * denormalised copy on `documents` was last-write-wins.
+   *
+   * "Latest" is `created_at desc, id desc` — the same total order retrieval
+   * uses to pick a version, so the status column and the corpus can never
+   * disagree about which version is current.
+   */
+  private async setDocumentStatusIfLatest(tx: Tx, documentId: string, workspaceId: string, versionId: string, status: 'processing' | 'indexed' | 'failed'): Promise<void> {
+    await tx.execute(sql`
+      update documents set status = ${status}, updated_at = now()
+      where id = ${documentId}::uuid
+        and workspace_id = ${workspaceId}::uuid
+        and ${versionId}::uuid = (
+          select v.id from document_versions v
+          where v.document_id = ${documentId}::uuid and v.workspace_id = ${workspaceId}::uuid
+          order by v.created_at desc, v.id desc
+          limit 1
+        )
+    `);
+  }
+
   async process(job: Job<IngestDocumentJob>): Promise<void> {
     const { documentId, documentVersionId, workspaceId, objectKey, contentType, originalFilename, traceId } = job.data;
     // The trace id rode the payload across the process boundary; logging it
@@ -45,7 +74,7 @@ export class IngestionWorker extends WorkerHost {
     if (traceId) this.logger.log(`ingest ${documentVersionId} trace=${traceId} doc=${documentId} workspace=${workspaceId} file=${originalFilename}`);
     await withWorkspace(this.db, workspaceId, async (tx) => {
       await tx.update(documentVersions).set({ status: 'processing', updatedAt: new Date(), failureMessage: null }).where(and(eq(documentVersions.id, documentVersionId), eq(documentVersions.workspaceId, workspaceId)));
-      await tx.update(documents).set({ status: 'processing', updatedAt: new Date() }).where(and(eq(documents.id, documentId), eq(documents.workspaceId, workspaceId)));
+      await this.setDocumentStatusIfLatest(tx, documentId, workspaceId, documentVersionId, 'processing');
     });
     try {
       const parsed = await this.parser.parse(await this.storage.download(objectKey), contentType, originalFilename);
@@ -59,9 +88,16 @@ export class IngestionWorker extends WorkerHost {
         // searchVector is gone from the insert list: it is a STORED generated
         // column now, so Postgres derives it from content and the two can
         // never drift apart.
-        for (const { chunkIndex, content, charStart, charEnd, embedding } of embeddedChunks) await tx.insert(documentChunks).values({ documentVersionId, workspaceId, chunkIndex, content, charStart, charEnd, tokenCount: content.split(/\s+/).length, embedding, embeddingModel: this.embeddings.modelName });
+        // One INSERT ... VALUES (...), (...) instead of N round trips: a
+        // 500-chunk document paid 500 sequential awaits inside this tx.
+        await tx.insert(documentChunks).values(
+          embeddedChunks.map(({ chunkIndex, content, charStart, charEnd, embedding }) => ({
+            documentVersionId, workspaceId, chunkIndex, content, charStart, charEnd,
+            tokenCount: content.split(/\s+/).length, embedding, embeddingModel: this.embeddings.modelName,
+          })),
+        );
         await tx.update(documentVersions).set({ status: 'indexed', parserVersion: parsed.parserVersion, embeddingModel: this.embeddings.modelName, updatedAt: new Date() }).where(eq(documentVersions.id, documentVersionId));
-        await tx.update(documents).set({ status: 'indexed', updatedAt: new Date() }).where(eq(documents.id, documentId));
+        await this.setDocumentStatusIfLatest(tx, documentId, workspaceId, documentVersionId, 'indexed');
       });
     } catch (error) {
       const message = error instanceof Error ? error.message.slice(0, 1000) : 'Document processing failed';
@@ -72,7 +108,7 @@ export class IngestionWorker extends WorkerHost {
       const isFinalAttempt = job.attemptsStarted >= (job.opts.attempts ?? 1);
       await withWorkspace(this.db, workspaceId, async (tx) => {
         await tx.update(documentVersions).set({ status: isFinalAttempt ? 'failed' : 'processing', failureMessage: message, updatedAt: new Date() }).where(eq(documentVersions.id, documentVersionId));
-        if (isFinalAttempt) await tx.update(documents).set({ status: 'failed', updatedAt: new Date() }).where(eq(documents.id, documentId));
+        if (isFinalAttempt) await this.setDocumentStatusIfLatest(tx, documentId, workspaceId, documentVersionId, 'failed');
       });
       throw error;
     }

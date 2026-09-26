@@ -43,6 +43,7 @@ export class MetricsService {
   readonly httpRequestsTotal: Counter<string>;
   readonly chatPreFrameSeconds: Histogram<string>;
   readonly ledgerWriteFailuresTotal: Counter<string>;
+  readonly staleEmbeddingChunksTotal: Counter<string>;
 
   constructor() {
     collectDefaultMetrics({ register: this.registry });
@@ -62,12 +63,30 @@ export class MetricsService {
       registers: [this.registry],
     });
 
+    this.staleEmbeddingChunksTotal = new Counter({
+      name: 'stale_embedding_chunks_total',
+      help: 'Chunks skipped by the vector leg because their embedding_model differs from EMBEDDING_MODEL. Non-zero means the corpus needs re-indexing and semantic search is degraded for those documents. No workspace label: per-tenant belongs in a query, not a time series.',
+      registers: [this.registry],
+    });
+
     this.ledgerWriteFailuresTotal = new Counter({
       name: 'ledger_write_failures_total',
       help: 'Failed writes to the per-tenant cost ledger. The ledger swallows failures by design (billing must not take the product down); this counter is what makes that trade-off honest. Alert on any increase.',
       labelNames: ['operation'],
       registers: [this.registry],
     });
+  }
+
+  /**
+   * Chunks excluded from the vector leg because they were embedded by a
+   * different model than EMBEDDING_MODEL. Non-zero means the corpus is
+   * half-migrated: those documents are reachable by keyword search only, and
+   * semantic recall is quietly halved until a re-index. Alert on any
+   * increase — like the ledger counter, this exists so a deliberate silent
+   * behaviour stops being invisible.
+   */
+  recordStaleEmbeddingChunks(count: number): void {
+    this.staleEmbeddingChunksTotal.inc(count);
   }
 
   /** Records a request outcome at the controller boundary. */

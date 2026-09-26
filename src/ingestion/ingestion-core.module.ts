@@ -9,6 +9,8 @@ import { ChunkerService } from './chunker.service';
 import { EmbeddingCache } from './embedding-cache.service';
 import { EmbeddingService } from './embedding.service';
 import { DocumentService } from './document.service';
+import { LlmModule } from '../llm/llm.module';
+import { MetricsCoreModule } from '../metrics/metrics-core.module';
 
 function redisConnection(url: string) {
   const parsed = new URL(url);
@@ -23,6 +25,17 @@ function redisConnection(url: string) {
       useFactory: (config: ConfigService<Env, true>) => ({ connection: redisConnection(config.get('REDIS_URL', { infer: true })) }),
     }),
     BullModule.registerQueue({ name: INGESTION_QUEUE }),
+    // EmbeddingService injects UsageLedger, which LlmModule provides. LlmModule
+    // is @Global(), but a global module must still appear in the graph to be
+    // loaded at all: the API got it transitively via AppModule, the worker
+    // never imported it, and start:worker could not boot from Phase 6 until
+    // this line existed. Imported by the module that actually consumes it.
+    LlmModule,
+    // DocumentService injects TraceContextService, and UsageLedger records into
+    // MetricsService. Both live in MetricsCoreModule — NOT MetricsModule,
+    // which carries the /metrics controller and HTTP middleware the worker
+    // must not load.
+    MetricsCoreModule,
   ],
   providers: [StorageService, ParserService, ChunkerService, EmbeddingCache, EmbeddingService, DocumentService],
   exports: [BullModule, StorageService, ParserService, ChunkerService, EmbeddingService, DocumentService],

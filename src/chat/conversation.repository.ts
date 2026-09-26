@@ -44,6 +44,17 @@ export class ConversationRepository {
     });
   }
 
+  /**
+   * Workspace conversation list for the history sidebar. Title + timestamps
+   * only — the list view never needs message bodies, and a 200-conversation
+   * workspace should not pay for them.
+   */
+  listConversations(workspaceId: string, limit: number): Promise<ConversationRow[]> {
+    return withWorkspace(this.db, workspaceId, async (tx) =>
+      tx.select().from(conversations).where(eq(conversations.workspaceId, workspaceId)).orderBy(desc(conversations.updatedAt)).limit(limit),
+    );
+  }
+
   createConversation(workspaceId: string, userId: string, title: string): Promise<ConversationRow> {
     return withWorkspace(this.db, workspaceId, async (tx) => {
       const [row] = await tx.insert(conversations).values({ workspaceId, createdBy: userId, title }).returning();

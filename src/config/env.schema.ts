@@ -25,6 +25,22 @@ export const envSchema = z.object({
     .default('true')
     .transform((v) => v === 'true'),
   UPLOAD_URL_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  // Abandoned-upload sweeper (Phase 7b). A presigned URL is handed out and
+  // the client may simply never PUT: the row stays `pending` and, if the PUT
+  // half-succeeded, the object sits in the bucket forever.
+  //
+  // Why a sweeper and not an S3 lifecycle rule: object keys are
+  // `workspace/document/version/filename` with NO prefix separating pending
+  // from completed uploads, so a blind age-based expiry would delete live
+  // documents. Only the database knows which uploads were abandoned. If the
+  // key layout ever grows a `pending/` prefix, a bucket rule becomes the
+  // cheaper answer and this can go.
+  //
+  // 24h, not 15 minutes: the presign TTL bounds when an upload can still
+  // succeed, but a generous margin keeps the sweeper away from anything a
+  // slow client or a retried upload might still be using.
+  ABANDONED_UPLOAD_TTL_HOURS: z.coerce.number().int().positive().default(24),
+  UPLOAD_SWEEP_INTERVAL_MS: z.coerce.number().int().positive().default(3_600_000),
   MAX_DOCUMENT_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
   // INGESTION_QUEUE is deliberately NOT configurable and must not be
   // re-added. Renaming a queue at runtime does not migrate anything: every
@@ -39,7 +55,20 @@ export const envSchema = z.object({
   // fails the boot regardless of what the decorator saw.
   INGESTION_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(2),
   EMBEDDING_BASE_URL: z.string().default('http://localhost:11434'),
-  EMBEDDING_MODEL: z.string().default('nomic-embed-text'),
+  // snowflake-arctic-embed:110m, chosen on measured grounds (2026-08-30).
+  // Benchmarked the whole Ollama embedding catalogue on this hardware, each
+  // model isolated and pre-warmed: every usable 768-dim model lands at
+  // 270-307ms/chunk, so speed was never the differentiator it looked like.
+  // Arctic wins on the axis that IS different: MTEB retrieval NDCG@10 of
+  // 54.90 vs nomic's 53.25, at 110M params vs 137M, with identical 768
+  // dimensions so no migration is needed. The faster options (all-minilm,
+  // granite:30m at ~75ms) are 384-dim and score ~42 on retrieval — four
+  // times the speed for the one quality that this product sells.
+  // qwen3-embedding:0.6b is 2260ms/chunk here and 1024-dim: unusable.
+  // CHANGING THIS REQUIRES A RE-INDEX. Vectors from two models are not
+  // comparable, and the vector leg now filters on embedding_model to
+  // enforce that.
+  EMBEDDING_MODEL: z.string().default('snowflake-arctic-embed:110m'),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(768).refine((value) => value === 768, 'Phase 3 schema requires 768-dimensional embeddings'),
   // HNSW visit budget per query. pgvector's default (40) is tuned for global
   // search; per-tenant filtered search needs headroom for the iterative scan
@@ -47,8 +76,36 @@ export const envSchema = z.object({
   // latency cost is small (graph traversal, not heap sort), and doc 12 charts
   // recall vs ef_search so this number stays a measurement, not folklore.
   // Hard cap is 1000 (pgvector enforces 1..1000).
+  // Per-signal fusion weights (Phase 8, measured on the golden set). The
+  // keyword leg answers every natural-language question once it uses OR
+  // semantics, including ones it should stay quiet about; unweighted fusion
+  // gives that noise a vote equal to a confident vector match. Tuned with
+  // `pnpm eval`, not guessed — see doc 14 for the sweep.
+  RRF_VECTOR_WEIGHT: z.coerce.number().positive().default(1),
+  // 0.05 is measured, not guessed. Swept on the golden set (`pnpm eval`):
+  //
+  //   ftsW   recall@5   MRR    nDCG@5
+  //   1.00     1.000    0.856   0.893
+  //   0.15     1.000    0.889   0.917
+  //   0.10     1.000    0.900   0.926
+  //   0.05     1.000    0.933   0.943   <- chosen
+  //   0.02     0.967    0.933   0.925
+  //   (vector only: 0.967 / 0.933 / 0.935)
+  //
+  // At 0.05 hybrid strictly beats vector-only on every metric; at 0.02 the
+  // keyword leg stops contributing the chunks the vector leg misses and
+  // recall falls back to vector-only's. The value looks tiny because RRF's
+  // 1/(k+rank) with k=60 compresses every contribution into a narrow band —
+  // and because the right ROLE for this leg is tie-breaker that surfaces
+  // what the vector leg missed, not co-equal ranker. Re-run the sweep if the
+  // embedding model, k, or the corpus mix changes.
+  RRF_FTS_WEIGHT: z.coerce.number().positive().default(0.07),
   HNSW_EF_SEARCH: z.coerce.number().int().min(1).max(1000).default(80),
-  CHUNK_SIZE: z.coerce.number().int().positive().default(1200),
+  // 512-token context of snowflake-arctic-embed:110m. Dense content (URLs,
+  // prices, code) tokenizes at ~2.3 chars/token, so 1200 chars overflowed the
+  // context and the provider 500'd mid-ingestion. 900 chars keeps the worst
+  // observed density under the limit; re-tune if EMBEDDING_MODEL changes.
+  CHUNK_SIZE: z.coerce.number().int().positive().default(900),
   CHUNK_OVERLAP: z.coerce.number().int().nonnegative().default(200),
   JWT_ACCESS_SECRET: z.string().min(32),
   JWT_ACCESS_TTL_SECONDS: z.coerce.number().int().positive().default(900),
@@ -106,6 +163,17 @@ export const envSchema = z.object({
   // slow — but 30s of silence mid-stream is a stall, not thinking.
   LLM_FIRST_TOKEN_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   LLM_IDLE_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
+  // Circuit breaker (Phase 7b), the seam Phase 6 designed and deferred.
+  // Three consecutive PRE-FIRST-TOKEN failures trip a provider: enough that a
+  // single blip plus its retries does not open the breaker, few enough that a
+  // genuinely dead provider stops costing every request its full retry
+  // budget before the chain falls through.
+  LLM_BREAKER_THRESHOLD: z.coerce.number().int().positive().default(3),
+  // Cooldown before ONE half-open probe is allowed. 30s: long enough that a
+  // dead provider is not probed on every request, short enough that recovery
+  // is noticed within a user's patience. State is per process on purpose —
+  // see the comment on ResilientProvider.
+  LLM_BREAKER_COOLDOWN_MS: z.coerce.number().int().positive().default(30_000),
   // Embeddings are single request/response, so one plain timeout suffices.
   EMBEDDING_TIMEOUT_MS: z.coerce.number().int().positive().default(30_000),
   EMBEDDING_MAX_RETRIES: z.coerce.number().int().nonnegative().default(2),

@@ -59,6 +59,8 @@ const settings = {
   GENERATION_MAX_TOKENS: 1024,
   GENERATION_TEMPERATURE: 0.2,
   HNSW_EF_SEARCH: 80,
+  RRF_VECTOR_WEIGHT: 1,
+  RRF_FTS_WEIGHT: 0.05,
   CHAT_REWRITE_BUDGET_MS: 5000,
 } as Partial<Env>;
 const config = { get: (key: keyof Env) => settings[key] } as unknown as ConfigService<Env, true>;
@@ -138,6 +140,34 @@ describe('chat (integration)', () => {
        values ($1, $2, 0, 'Our refund policy covers returned items within thirty days', 0, 58, $3::vector, 'test-embedding-model')`,
       [versionId, workspaceA, basis(0)],
     );
+
+    // A SECOND, lower-ranked source in its own document. Retrieval serves
+    // both; the scripted answer only ever cites [1]. Without a served-but-
+    // uncited source, the replay-fidelity assertion cannot distinguish
+    // "stored what was served" from "stored what was cited" — the exact bug
+    // being guarded. Its own document so adjacent-chunk merging cannot fold
+    // the two into one context item.
+    const secondaryDoc = (
+      await owner.query(`insert into documents (workspace_id, title, status) values ($1, 'Returns FAQ', 'indexed') returning id`, [workspaceA])
+    ).rows[0].id;
+    const secondaryVersion = (
+      await owner.query(
+        `insert into document_versions (document_id, workspace_id, object_key, original_filename, content_type, byte_size, status)
+         values ($1, $2, 'k/faq', 'faq.txt', 'text/plain', 100, 'indexed') returning id`,
+        [secondaryDoc, workspaceA],
+      )
+    ).rows[0].id;
+    const nearlyBasis0 = (() => {
+      const v = new Array<number>(DIMENSIONS).fill(0);
+      v[0] = 1;
+      v[1] = 0.3; // same direction, measurably farther: a deterministic rank 2
+      return `[${v.join(',')}]`;
+    })();
+    await owner.query(
+      `insert into document_chunks (document_version_id, workspace_id, chunk_index, content, char_start, char_end, embedding, embedding_model)
+       values ($1, $2, 0, 'Refund requests are reviewed within five business days', 0, 54, $3::vector, 'test-embedding-model')`,
+      [secondaryVersion, workspaceA, nearlyBasis0],
+    );
   });
 
   afterAll(async () => {
@@ -155,7 +185,11 @@ describe('chat (integration)', () => {
 
     expect(sink.events()).toEqual(['sources', ...ANSWER_CHUNKS.map(() => 'delta'), 'usage', 'done']);
     const sources = sink.frames[0].data as { sources: Array<{ n: number }>; rewrittenQuery: string | null };
-    expect(sources.sources).toHaveLength(1);
+    // Both fixture documents are served; the scripted answer cites only [1].
+    // That gap is deliberate — it is what makes the replay-fidelity test
+    // below able to fail.
+    expect(sources.sources).toHaveLength(2);
+    expect(sources.sources.map((x) => x.n)).toEqual([1, 2]);
     expect(sources.rewrittenQuery).toBeNull(); // first turn: no rewrite call
     expect(sink.text()).toBe(ANSWER_CHUNKS.join(''));
     expect(sink.last('done').data).toMatchObject({ finishReason: 'stop', model: 'scripted', unresolvedCitations: [] });
@@ -174,7 +208,9 @@ describe('chat (integration)', () => {
     });
     expect(rows[1].prompt_tokens).toBeGreaterThan(0);
     // The persisted citation is the RESOLVED map — chunk id + span as served.
-    expect(rows[1].citations[0]).toMatchObject({ n: 1, documentTitle: 'Refund policy', charStart: 0, charEnd: 58 });
+    // Phase 7b shape: everything SERVED, plus which the answer cited.
+    expect(rows[1].citations.sources[0]).toMatchObject({ n: 1, documentTitle: 'Refund policy', charStart: 0, charEnd: 58 });
+    expect(rows[1].citations.cited).toEqual([1]);
 
     // The ledger row: one per provider call, linked to the answer, cost an
     // exact integer in micro-USD (pg returns bigint as a string; '0' is the
@@ -223,7 +259,11 @@ describe('chat (integration)', () => {
     const conversationId = sink.last('done').data.conversationId as string;
     const rows = await allMessages(conversationId);
     expect(rows[1].unresolved_citations).toBe(1);
-    expect(rows[1].citations).toHaveLength(1);
+    // [9] does not resolve, so it is not in `cited` — but the sources that
+    // WERE served are still recorded in full, which is the point of the
+    // Phase 7b shape: replay shows what the live stream showed.
+    expect(rows[1].citations.cited).toEqual([1]);
+    expect(rows[1].citations.sources.length).toBeGreaterThan(0);
   });
 
   it('refuses deterministically on zero retrieval hits, with no LLM call', async () => {
@@ -266,6 +306,15 @@ describe('chat (integration)', () => {
     expect(second.events()).toEqual(['sources', 'delta', 'usage', 'done']);
     const rows = await allMessages(first.last('done').data.conversationId as string);
     expect(rows.filter((r) => r.role === 'user')).toHaveLength(1);
+
+    // A replay must show the SAME sources the live stream did. Storing only
+    // the cited subset made a reloaded conversation quietly drop the chips
+    // for everything retrieval had put in the prompt but the answer did not
+    // happen to cite.
+    const liveSources = (first.frames[0].data as { sources: unknown[] }).sources;
+    const replaySources = (second.frames[0].data as { sources: unknown[] }).sources;
+    expect(replaySources).toEqual(liveSources);
+    expect(liveSources.length, 'fixture must serve more sources than the answer cites, or this proves nothing').toBeGreaterThan(1);
   });
 
   it('regenerates a retried turn whose only answer was a partial', async () => {
