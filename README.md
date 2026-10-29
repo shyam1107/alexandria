@@ -4,8 +4,6 @@
 
 Teams create a workspace, upload documents (PDF, DOCX, Markdown), and ask questions in natural language. Answers stream back token-by-token with citations to the exact source passages — and the system says "I don't know" when the documents don't support an answer.
 
-> 🚧 **Building in public.** This project is under active development, phase by phase, with the reasoning behind every architecture decision shared along the way. Follow the journey on X: [@shyam1107](https://x.com/) <!-- TODO: replace with actual handle -->
-
 ## Why this exists
 
 Most RAG examples are "chat with one PDF" demos. Alexandria is deliberately built like a real product: asynchronous ingestion pipelines, hybrid retrieval, strict multi-tenant isolation, cost tracking, provider fallbacks, and an evaluation harness. No LangChain — every part of the pipeline is implemented explicitly, because the goal is to understand (and be able to debug) what frameworks hide.
@@ -64,19 +62,6 @@ pnpm start:worker:dev
 ```
 
 Ollama (local LLM, several-GB downloads) is opt-in: `pnpm infra:llm`, then pull models per `docker-compose.yml` comments.
-
-## Roadmap
-
-- [x] **Foundation** — NestJS scaffold (API + worker), validated config, Drizzle, dev infra, health checks with probe deadlines, Swagger
-- [x] **Identity & tenancy** — JWT-style access tokens, rotating refresh tokens, workspaces, membership guards, Postgres RLS
-- [x] **Ingestion** — upload → parse → chunk → embed → index via BullMQ (retries, idempotent processing, status API)
-- [ ] **Retrieval** — pgvector HNSW + Postgres FTS, RRF, metadata filters, re-ranking
-- [ ] **Generation** — streaming answers (SSE), citations, conversation memory, grounded refusals
-- [ ] **LLM platform** — provider fallbacks, retries, per-tenant token & cost tracking
-- [ ] **Hardening** — rate limiting, caching, quotas, observability
-- [ ] **Quality** — test suite + RAG evaluation harness (retrieval metrics, faithfulness)
-- [ ] **Deployment** — AWS (ECS/RDS/ElastiCache/S3), CI/CD
-- [ ] Thin streaming chat UI for demos
 
 ## License
 
